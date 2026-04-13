@@ -9,6 +9,12 @@ const {
 } = require("../electron/python-locate.cjs");
 
 const req = path.join(__dirname, "..", "python_service", "requirements.txt");
+const cudaReq = path.join(
+  __dirname,
+  "..",
+  "python_service",
+  "requirements-cuda-windows.txt",
+);
 
 if (process.platform !== "win32") {
   console.log("請執行：python3 -m pip install -r python_service/requirements.txt");
@@ -60,4 +66,24 @@ const inst = spawnSync(
   ["-m", "pip", "install", "-r", req],
   { stdio: "inherit", env, cwd: path.join(__dirname, "..") },
 );
-process.exit(inst.status ?? 1);
+if ((inst.status ?? 1) !== 0) process.exit(inst.status ?? 1);
+
+const cudaInst = spawnSync(
+  good.exe,
+  ["-m", "pip", "install", "-r", cudaReq],
+  { stdio: "inherit", env, cwd: path.join(__dirname, "..") },
+);
+if ((cudaInst.status ?? 1) !== 0) {
+  console.warn("");
+  console.warn(
+    "[語音辨識與翻譯] Windows GPU 套件（cuBLAS／cuDNN）安裝失敗，仍可使用 CPU 轉錄。",
+  );
+  console.warn(
+    "  若需 GPU，請確認 Python 版本有對應 wheel（建議 3.12），並手動執行：",
+  );
+  console.warn(
+    `  "${good.exe}" -m pip install -r python_service/requirements-cuda-windows.txt`,
+  );
+  console.warn("");
+}
+process.exit(0);

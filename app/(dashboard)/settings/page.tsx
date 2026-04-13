@@ -23,6 +23,7 @@ export default function SettingsPage() {
   );
   const [translationModel, setTranslationModel] = useState("gpt-4o-mini");
   const [whisperDevice, setWhisperDevice] = useState<WhisperDevice>("auto");
+  const [huggingfaceToken, setHuggingfaceToken] = useState("");
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
@@ -41,6 +42,7 @@ export default function SettingsPage() {
       else setWhisperDevice("auto");
       if (s.summaryProvider === "anthropic") setSummaryProvider("anthropic");
       else setSummaryProvider("openai");
+      setHuggingfaceToken(String(s.huggingfaceToken ?? ""));
     })();
   }, []);
 
@@ -54,6 +56,7 @@ export default function SettingsPage() {
       anthropicSummaryModel,
       translationModel,
       whisperDevice,
+      huggingfaceToken,
     });
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
@@ -95,14 +98,44 @@ export default function SettingsPage() {
               }
             >
               <option value="auto">
-                自動（偵測到 NVIDIA CUDA 時用 GPU，否則 CPU）
+                自動（CTranslate2 偵測到 CUDA 時用 GPU，否則 CPU）
               </option>
               <option value="cpu">CPU</option>
               <option value="cuda">CUDA（NVIDIA 顯示卡／GPU）</option>
             </select>
             <p className="text-xs text-muted-foreground">
-              本程式使用 faster-whisper：在 Windows 上透過 NVIDIA CUDA 使用獨顯。選「CUDA」前請確認已安裝支援
-              GPU 的 PyTorch（例如 CUDA 版）；若僅 CPU 版 PyTorch，請選「CPU」或「自動」。
+              使用 faster-whisper（CTranslate2）。Windows GPU：請執行{" "}
+              <code className="rounded bg-muted px-1">npm run setup:python</code>{" "}
+              以安裝{" "}
+              <code className="rounded bg-muted px-1">
+                requirements-cuda-windows.txt
+              </code>
+              （cuBLAS／cuDNN）；或手動{" "}
+              <code className="rounded bg-muted px-1">
+                pip install -r python_service/requirements-cuda-windows.txt
+              </code>
+              。亦需 NVIDIA 驅動。不必為轉錄另外安裝 PyTorch。
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="hf-token">Hugging Face Token（說話人識別選用）</Label>
+            <Input
+              id="hf-token"
+              type="password"
+              autoComplete="off"
+              placeholder="hf_..."
+              value={huggingfaceToken}
+              onChange={(e) => setHuggingfaceToken(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">
+              用於本機 pyannote
+              模型下載與辨識；僅存於本機。請至 Hugging Face 申請帳號並接受
+              pyannote/speaker-diarization-3.1 等模型使用條款，另請安裝{" "}
+              <code className="rounded bg-muted px-0.5">
+                requirements-speaker.txt
+              </code>
+              。
             </p>
           </div>
         </Card>

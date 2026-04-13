@@ -25,9 +25,27 @@ export interface DbTaskPayload {
 export interface ElectronAPI {
   getPathForFile: (file: File) => string;
   getFileUrl: (filePath: string) => Promise<string | null>;
+  /** 讀取本機媒體二進位（供波形解碼；避免 renderer fetch(media://) 失敗） */
+  readMediaFile: (filePath: string) => Promise<Uint8Array | null>;
   openFileDialog: () => Promise<string | null>;
-  /** 本機檔案路徑，或 http(s) 連結（由 Python 以 yt-dlp 下載後轉錄） */
-  transcribeStart: (filePathOrUrl: string) => Promise<{ ok: boolean; error?: string }>;
+  /** 僅 YouTube 連結：是否可取得可解析字幕（供轉錄前詢問使用者） */
+  youtubeProbeSubtitles: (url: string) => Promise<{
+    ok: boolean;
+    available?: boolean;
+    label?: string;
+    lang?: string;
+    source?: string;
+    error?: string;
+  }>;
+  /** 字串＝本機路徑或任意網址；物件可指定 YouTube 字幕策略 */
+  transcribeStart: (
+    payload:
+      | string
+      | {
+          input: string;
+          youtubeSubsMode?: "import" | "whisper";
+        },
+  ) => Promise<{ ok: boolean; error?: string }>;
   transcribeCancel: () => Promise<{ ok: boolean }>;
   onTranscribeEvent: (cb: (payload: TranscriptEvent) => void) => () => void;
 
@@ -51,6 +69,11 @@ export interface ElectronAPI {
     defaultName?: string;
     filters?: { name: string; extensions: string[] }[];
   }) => Promise<{ ok: boolean; canceled?: boolean; path?: string; error?: string }>;
+
+  /** 主程序寫入系統剪貼簿（renderer 的 navigator.clipboard 在 file:// 等情境常失敗） */
+  clipboardWriteText: (
+    text: string,
+  ) => Promise<{ ok: boolean; error?: string }>;
 
   aiSummarize: (opts: {
     transcript: string;
@@ -76,6 +99,16 @@ export interface ElectronAPI {
   }) => Promise<{
     ok: boolean;
     results?: { id: string; text: string }[];
+    error?: string;
+  }>;
+
+  /** 對本機媒體執行說話人分離並回傳各段 id 的 speaker 標籤 */
+  assignSpeakers: (opts: {
+    mediaPath: string;
+    segments: Pick<TranscriptSegment, "id" | "start" | "end">[];
+  }) => Promise<{
+    ok: boolean;
+    updates?: { id: string; speaker: string }[];
     error?: string;
   }>;
 }

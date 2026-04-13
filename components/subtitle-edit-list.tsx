@@ -3,12 +3,12 @@
 import { useEffect, useRef } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
+import { TranscriptHeaderActions } from "@/components/transcript-header-actions";
 import { useAppStore } from "@/lib/store";
 import { formatTimestamp } from "@/lib/format-time";
 import { readTimecodeClickMode } from "@/lib/timecode-click-mode";
 import { cn } from "@/lib/utils";
 import { TimecodeClickModeControls } from "@/components/timecode-click-mode-controls";
-import { TranscriptHeaderActions } from "@/components/transcript-header-actions";
 
 const SEG_END_EPS = 0.05;
 
@@ -16,7 +16,7 @@ function isSegmentActive(t: number, start: number, end: number) {
   return t >= start && t < end + SEG_END_EPS;
 }
 
-export function TranscriptPanel() {
+export function SubtitleEditList() {
   const segments = useAppStore((s) => s.segments);
   const updateSegment = useAppStore((s) => s.updateSegment);
   const playbackTime = useAppStore((s) => s.playbackTime);
@@ -27,9 +27,7 @@ export function TranscriptPanel() {
   const segmentElRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const lastFollowedSegIdRef = useRef<string | null>(null);
   const lastSegId = segments.at(-1)?.id ?? "";
-  /** 單一 primitive，避免 useEffect 依賴從 [segments]（長度 1）改成多欄位時在 React 19 觸發「依賴陣列長度變了」錯誤；亦避免逐字編輯時重跑捲動 */
   const segmentListScrollKey = `${segments.length}:${lastSegId}`;
-  /** 僅含 id／時間軸，段落文字編輯時不變，供跟隨目前句捲動用 */
   const segmentTimingKey = segments
     .map((s) => `${s.id}:${s.start}:${s.end}`)
     .join("|");
@@ -61,15 +59,14 @@ export function TranscriptPanel() {
     if (active.id === lastFollowedSegIdRef.current) return;
     lastFollowedSegIdRef.current = active.id;
     const el = segmentElRefs.current.get(active.id);
-    /** 置中可讀性較佳；若用 nearest 長段落時常只卡住邊緣 */
     el?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [playbackTime, segmentTimingKey]);
 
   return (
-    <div className="flex h-full min-h-0 flex-1 flex-col border-l border-border bg-card/30">
+    <div className="flex h-full min-h-0 flex-1 flex-col bg-card/30">
       <div className="relative z-20 shrink-0 border-b border-border bg-card/30 px-4 py-3">
-        <div className="flex items-start justify-between gap-2">
-          <h2 className="text-sm font-semibold leading-7">逐字稿</h2>
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <h2 className="text-sm font-semibold leading-7">字幕與翻譯</h2>
           <TranscriptHeaderActions />
         </div>
       </div>
@@ -89,7 +86,7 @@ export function TranscriptPanel() {
           : null}
           {segments.length === 0 ?
             <p className="px-2 py-8 text-center text-sm text-muted-foreground">
-              轉錄結果將即時顯示於此
+              請先在「轉錄」工作區匯入媒體並完成轉錄，或從左側歷史載入紀錄。
             </p>
           : segments.map((seg) => {
               const active = isSegmentActive(
@@ -198,7 +195,7 @@ export function TranscriptPanel() {
                       }
                       rows={3}
                       className={transcriptTextareaClass}
-                      aria-label="逐字稿"
+                      aria-label="字幕"
                     />}
                 </div>
               );

@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import {
+  mergeSavedTaskIntoHistoryList,
   refreshTasksInStore,
   saveWorkspaceSnapshot,
 } from "@/lib/persist-task";
@@ -49,46 +50,85 @@ export function useTranscribeListener() {
             start: ev.start,
             end: ev.end,
             text: ev.text,
+            speaker:
+              typeof ev.speaker === "string" && ev.speaker.trim() ?
+                ev.speaker.trim()
+              : null,
           });
-          if (useAppStore.getState().status !== "error") {
-            setStatus("processing");
-          }
           break;
         case "error":
           setStatus("error", ev.message ?? "未知錯誤");
           break;
         case "done": {
           const code = ev.code ?? 0;
-          if (code !== 0) {
-            if (useAppStore.getState().status === "error") {
+          const snap = useAppStore.getState();
+          const hasTranscript = snap.segments.length > 0;
+          const hadErrorStatus = snap.status === "error";
+          /** Python 已送出逐字稿但程序以非零碼結束（常見：Windows 原生庫在關閉時崩潰） */
+          const recoverOk = code !== 0 && hasTranscript && !hadErrorStatus;
+
+          if (code !== 0 && !recoverOk) {
+            if (hadErrorStatus) {
               // setProgress(0, "") 會清空 statusMessage，錯誤訊息會一閃即逝
               useAppStore.setState({ progress: 0 });
               break;
             }
             setProgress(0, "");
+            const winAccessViolation = code === 3221226505;
+            const hint = winAccessViolation ?
+              "此代碼多為存取違規（0xC0000005），常發生在 GPU／faster-whisper 相關 DLL 於程序結束時卸載；可嘗試 WHISPER_DEVICE=cpu、更新顯示驅動，或重新安裝 python_service 依賴。"
+            : "請確認已安裝 faster-whisper、yt-dlp 與 ffmpeg，並在終端機執行：cd python_service 後 pip install -r requirements.txt；若使用打包版，請確認內嵌 Python 環境已安裝上述套件。";
             setStatus(
               "error",
-              `轉錄程序結束（代碼 ${code}）。未收到詳細錯誤訊息。請確認已安裝 faster-whisper、yt-dlp 與 ffmpeg，並在終端機執行：cd python_service 後 pip install -r requirements.txt；若使用打包版，請確認內嵌 Python 環境已安裝上述套件。`,
+              `轉錄程序結束（代碼 ${code}）。未收到詳細錯誤訊息。${hint}`,
             );
           } else {
-            setProgress(100, "完成");
-            setStatus("done");
+            const doneMsg =
+              recoverOk ?
+                "完成（程序回報異常結束，逐字稿已保留並寫入歷史）"
+              : "完成";
+            setProgress(100, doneMsg);
+            setStatus("done", doneMsg);
             void (async () => {
               const s = useAppStore.getState();
-              const r = await saveWorkspaceSnapshot({
-                segments: s.segments,
-                currentTaskId: s.currentTaskId,
-                taskCreatedAt: s.taskCreatedAt,
-                mediaName: s.mediaName,
-                mediaPath: s.mediaPath,
-                summary: s.summary,
-              });
-              if (!r.ok || !r.taskId) return;
-              useAppStore.setState({
-                currentTaskId: r.taskId,
-                taskCreatedAt: r.createdAt ?? null,
-              });
-              await refreshTasksInStore(useAppStore.getState().setTasks);
+              const segments = s.segments.map((seg) => ({ ...seg }));
+              try {
+                const r = await saveWorkspaceSnapshot({
+                  segments,
+                  currentTaskId: s.currentTaskId,
+                  taskCreatedAt: s.taskCreatedAt,
+                  mediaName: s.mediaName,
+                  mediaPath: s.mediaPath,
+                  summary: s.summary,
+                });
+                if (!r.ok) {
+                  setStatus(
+                    "error",
+                    r.error ??
+                      "轉錄已完成，但無法寫入歷史紀錄。請使用工具列「儲存紀錄」手動儲存。",
+                  );
+                  return;
+                }
+                mergeSavedTaskIntoHistoryList({
+                  taskId: r.taskId,
+                  createdAt: r.createdAt,
+                  name: r.taskName,
+                  mediaPath: r.savedMediaPath,
+                  mediaName: r.savedMediaName,
+                });
+                useAppStore.setState({
+                  currentTaskId: r.taskId,
+                  taskCreatedAt: r.createdAt,
+                });
+                await refreshTasksInStore(useAppStore.getState().setTasks);
+              } catch (e) {
+                const msg =
+                  e instanceof Error ? e.message : String(e);
+                setStatus(
+                  "error",
+                  `轉錄已完成，但寫入歷史時發生錯誤：${msg}`,
+                );
+              }
             })();
           }
           break;

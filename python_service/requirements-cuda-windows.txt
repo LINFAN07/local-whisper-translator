@@ -1,0 +1,3 @@
+# Windows：供 CTranslate2／faster-whisper 載入 cublas64_12.dll、cudnn 等（體積較大，僅 GPU 需要）
+nvidia-cublas-cu12>=12.4.5.8
+nvidia-cudnn-cu12>=9.0.0,<10.0.0

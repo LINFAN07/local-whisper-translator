@@ -10,7 +10,6 @@ import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { Card } from "@/components/ui/card";
 import { useAppStore } from "@/lib/store";
-import { useTranscribeListener } from "@/hooks/use-transcribe-listener";
 import { AiExportPanel } from "@/components/ai-export-panel";
 
 function isHttpUrlString(s: string): boolean {
@@ -22,9 +21,17 @@ function isHttpUrlString(s: string): boolean {
   }
 }
 
-export function MainWorkspace() {
-  useTranscribeListener();
+function isYoutubeHttpUrl(s: string): boolean {
+  const t = s.trim().toLowerCase();
+  if (!t.startsWith("http://") && !t.startsWith("https://")) return false;
+  return (
+    t.includes("youtube.com") ||
+    t.includes("youtu.be") ||
+    t.includes("youtube-nocookie.com")
+  );
+}
 
+export function MainWorkspace() {
   const mediaPath = useAppStore((s) => s.mediaPath);
   const mediaSrc = useAppStore((s) => s.mediaSrc);
   const mediaName = useAppStore((s) => s.mediaName);
@@ -41,6 +48,11 @@ export function MainWorkspace() {
   const setPlaybackTime = useAppStore((s) => s.setPlaybackTime);
 
   const [urlDraft, setUrlDraft] = useState("");
+  const [youtubeSubPrompt, setYoutubeSubPrompt] = useState<{
+    input: string;
+    label: string;
+  } | null>(null);
+  const [probingYoutube, setProbingYoutube] = useState(false);
   const syncedMediaPathRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -148,13 +160,42 @@ export function MainWorkspace() {
     ],
   );
 
+  const runTranscribeWithOptions = useCallback(
+    async (input: string, youtubeSubsMode?: "import" | "whisper") => {
+      clearSegments();
+      setCurrentTaskId(null);
+      setTaskCreatedAt(null);
+      setSummary(null);
+      setProgress(0, "開始…");
+      setStatus("processing");
+      const api = window.electronAPI!;
+      const payload =
+        youtubeSubsMode !== undefined ?
+          { input, youtubeSubsMode }
+        : input;
+      const r = await api.transcribeStart(payload);
+      if (!r?.ok) {
+        setStatus("error", r?.error ?? "無法啟動轉錄");
+      }
+    },
+    [
+      clearSegments,
+      setCurrentTaskId,
+      setProgress,
+      setStatus,
+      setSummary,
+      setTaskCreatedAt,
+    ],
+  );
+
   const startTranscribe = useCallback(async () => {
     const pathOrUrl = mediaPath?.trim() ?? "";
     const isRemoteUrl =
       pathOrUrl.startsWith("http://") || pathOrUrl.startsWith("https://");
     if (!isRemoteUrl && !mediaSrc) return;
 
-    if (!window.electronAPI?.transcribeStart) {
+    const api = window.electronAPI;
+    if (!api?.transcribeStart) {
       setStatus(
         "error",
         "目前為瀏覽器預覽模式，無法執行本機轉錄。請關閉此分頁，在專案目錄執行 npm run electron:dev，或使用已安裝的桌面版。",
@@ -173,25 +214,44 @@ export function MainWorkspace() {
     const input = isRemoteUrl ? pathOrUrl : mediaPath!.trim();
     if (!input) return;
 
-    clearSegments();
-    setCurrentTaskId(null);
-    setTaskCreatedAt(null);
-    setSummary(null);
-    setProgress(0, "開始…");
-    setStatus("processing");
-    const r = await window.electronAPI.transcribeStart(input);
-    if (!r?.ok) {
-      setStatus("error", r?.error ?? "無法啟動轉錄");
+    const useYoutubeProbe =
+      isRemoteUrl &&
+      isYoutubeHttpUrl(input) &&
+      typeof api.youtubeProbeSubtitles === "function";
+
+    if (useYoutubeProbe) {
+      setProbingYoutube(true);
+      setProgress(0, "正在檢查 YouTube 字幕…");
+      setStatus("idle", "");
+      let probe;
+      try {
+        probe = await api.youtubeProbeSubtitles(input);
+      } finally {
+        setProbingYoutube(false);
+        setProgress(0, "");
+      }
+      if (!probe?.ok) {
+        await runTranscribeWithOptions(input, "whisper");
+        return;
+      }
+      if (probe.available) {
+        setYoutubeSubPrompt({
+          input,
+          label: (probe.label ?? "").trim() || "可用字幕",
+        });
+        return;
+      }
+      await runTranscribeWithOptions(input, "whisper");
+      return;
     }
+
+    await runTranscribeWithOptions(input);
   }, [
-    clearSegments,
     mediaPath,
     mediaSrc,
-    setCurrentTaskId,
+    runTranscribeWithOptions,
     setProgress,
     setStatus,
-    setSummary,
-    setTaskCreatedAt,
   ]);
 
   const cancelTranscribe = useCallback(async () => {
@@ -200,7 +260,7 @@ export function MainWorkspace() {
   }, [setStatus]);
 
   const startNewImport = useCallback(() => {
-    if (status === "processing") return;
+    if (status === "processing" || probingYoutube) return;
     if (mediaSrc?.startsWith("blob:")) {
       try {
         URL.revokeObjectURL(mediaSrc);
@@ -218,9 +278,12 @@ export function MainWorkspace() {
     setPlaybackTime(0);
     setUrlDraft("");
     syncedMediaPathRef.current = null;
+    setYoutubeSubPrompt(null);
+    setProbingYoutube(false);
   }, [
     clearSegments,
     mediaSrc,
+    probingYoutube,
     setCurrentTaskId,
     setMedia,
     setPlaybackTime,
@@ -231,7 +294,10 @@ export function MainWorkspace() {
     status,
   ]);
 
-  const busy = status === "processing";
+  const busy =
+    status === "processing" ||
+    probingYoutube ||
+    youtubeSubPrompt !== null;
 
   const pathOrUrlTrim = mediaPath?.trim() ?? "";
   const isRemoteUrl =
@@ -320,6 +386,7 @@ export function MainWorkspace() {
                 <code className="rounded bg-muted px-1 py-0.5">yt-dlp</code> 與{" "}
                 <code className="rounded bg-muted px-1 py-0.5">ffmpeg</code>
                 。可涵蓋多數常見影音站（YouTube、Bilibili 等，實際以 yt-dlp 為準）；下載與轉錄皆在本機執行。
+                YouTube 若偵測到字幕，開始轉錄前可選擇直接帶入或使用 Whisper。
               </p>
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                 <Input
@@ -382,6 +449,67 @@ export function MainWorkspace() {
       <div className="relative z-0 flex h-[min(360px,42vh)] min-h-0 w-full shrink-0 border-t border-border lg:h-full lg:w-[min(420px,38vw)] lg:border-l lg:border-t-0">
         <TranscriptPanel />
       </div>
+
+      {youtubeSubPrompt ?
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="yt-sub-choice-title"
+        >
+          <Card className="max-w-md shadow-lg">
+            <div className="space-y-4 p-5">
+              <h2
+                id="yt-sub-choice-title"
+                className="text-base font-semibold tracking-tight"
+              >
+                偵測到 YouTube 字幕
+              </h2>
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                此連結有可用的字幕（{youtubeSubPrompt.label}）。請選擇直接使用字幕，或以
+                Whisper 重新辨識語音。
+              </p>
+              <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setYoutubeSubPrompt(null);
+                  }}
+                >
+                  取消
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    const p = youtubeSubPrompt;
+                    if (!p) return;
+                    setYoutubeSubPrompt(null);
+                    void runTranscribeWithOptions(p.input, "whisper");
+                  }}
+                >
+                  使用 Whisper 轉錄
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => {
+                    const p = youtubeSubPrompt;
+                    if (!p) return;
+                    setYoutubeSubPrompt(null);
+                    void runTranscribeWithOptions(p.input, "import");
+                  }}
+                >
+                  帶入 YouTube 字幕
+                </Button>
+              </div>
+            </div>
+          </Card>
+        </div>
+      : null}
     </div>
   );
 }

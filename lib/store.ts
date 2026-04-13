@@ -1,6 +1,14 @@
 import { create } from "zustand";
 import type { AiSummary, TranscriptSegment, TaskItem } from "@/lib/types";
 
+const MAX_SEGMENT_TIMING_UNDO = 80;
+
+export type SegmentTimingUndoEntry = {
+  id: string;
+  start: number;
+  end: number;
+};
+
 interface AppState {
   tasks: TaskItem[];
   setTasks: (tasks: TaskItem[]) => void;
@@ -31,7 +39,24 @@ interface AppState {
   appendSegment: (s: Omit<TranscriptSegment, "id">) => void;
   clearSegments: () => void;
   replaceSegments: (segments: TranscriptSegment[]) => void;
+  updateSegment: (
+    id: string,
+    patch: Partial<
+      Pick<TranscriptSegment, "text" | "translatedText" | "start" | "end">
+    >,
+  ) => void;
+
+  /** 時間軸拖曳調整起訖後可復原（與文字編輯分開） */
+  segmentTimingUndoStack: SegmentTimingUndoEntry[];
+  pushSegmentTimingUndo: (entry: SegmentTimingUndoEntry) => void;
+  /** 復原最近一次時間軸調整；若對應句段已不存在則僅彈出該筆紀錄 */
+  undoSegmentTiming: () => boolean;
+
+  mediaDuration: number | null;
+  setMediaDuration: (seconds: number | null) => void;
   setSegmentTranslations: (updates: { id: string; text: string }[]) => void;
+  setSegmentSpeakers: (updates: { id: string; speaker: string | null }[]) => void;
+  clearAllSpeakers: () => void;
 
   summary: AiSummary | null;
   setSummary: (s: AiSummary | null) => void;
@@ -41,7 +66,13 @@ interface AppState {
 
   seekTick: number;
   seekTime: number;
-  requestSeek: (t: number) => void;
+  /** 與 seek 配對：僅在需要時遞增，供 MediaPlayer 在跳轉後呼叫 play()；處理完應歸零以免換頁重掛時誤播 */
+  playAfterSeekTick: number;
+  clearPlayAfterSeek: () => void;
+  /** 若為數字，播放到該秒數時自動暫停（點時間碼「只播該句」）；一般 seek 會清除 */
+  playbackStopAt: number | null;
+  clearPlaybackStopAt: () => void;
+  requestSeek: (t: number, opts?: { play?: boolean; playUntil?: number }) => void;
 
   aiBusy: boolean;
   setAiBusy: (v: boolean) => void;
@@ -70,8 +101,16 @@ export const useAppStore = create<AppState>((set) => ({
   mediaSrc: null,
   mediaPath: null,
   mediaName: null,
+  mediaDuration: null,
   setMedia: ({ src, path = null, name = null }) =>
-    set({ mediaSrc: src, mediaPath: path, mediaName: name }),
+    set({
+      mediaSrc: src,
+      mediaPath: path,
+      mediaName: name,
+      mediaDuration: null,
+      playbackStopAt: null,
+      segmentTimingUndoStack: [],
+    }),
 
   progress: 0,
   status: "idle",
@@ -91,8 +130,42 @@ export const useAppStore = create<AppState>((set) => ({
         },
       ],
     })),
-  clearSegments: () => set({ segments: [] }),
-  replaceSegments: (segments) => set({ segments }),
+  clearSegments: () =>
+    set({ segments: [], playbackStopAt: null, segmentTimingUndoStack: [] }),
+  replaceSegments: (segments) =>
+    set({ segments, playbackStopAt: null, segmentTimingUndoStack: [] }),
+  segmentTimingUndoStack: [],
+  pushSegmentTimingUndo: (entry) =>
+    set((s) => ({
+      segmentTimingUndoStack: [
+        ...s.segmentTimingUndoStack,
+        entry,
+      ].slice(-MAX_SEGMENT_TIMING_UNDO),
+    })),
+  undoSegmentTiming: () => {
+    let applied = false;
+    set((s) => {
+      if (s.segmentTimingUndoStack.length === 0) return s;
+      const snap = s.segmentTimingUndoStack[s.segmentTimingUndoStack.length - 1]!;
+      const stack = s.segmentTimingUndoStack.slice(0, -1);
+      const seg = s.segments.find((x) => x.id === snap.id);
+      if (!seg) return { segmentTimingUndoStack: stack };
+      applied = true;
+      return {
+        segmentTimingUndoStack: stack,
+        segments: s.segments.map((x) =>
+          x.id === snap.id ? { ...x, start: snap.start, end: snap.end } : x,
+        ),
+      };
+    });
+    return applied;
+  },
+  updateSegment: (id, patch) =>
+    set((s) => ({
+      segments: s.segments.map((seg) =>
+        seg.id === id ? { ...seg, ...patch } : seg,
+      ),
+    })),
   setSegmentTranslations: (updates) =>
     set((s) => {
       const map = new Map(updates.map((u) => [u.id, u.text]));
@@ -104,6 +177,21 @@ export const useAppStore = create<AppState>((set) => ({
         }),
       };
     }),
+  setSegmentSpeakers: (updates) =>
+    set((s) => {
+      const map = new Map(updates.map((u) => [u.id, u.speaker]));
+      return {
+        segments: s.segments.map((seg) => {
+          const sp = map.get(seg.id);
+          if (sp === undefined) return seg;
+          return { ...seg, speaker: sp };
+        }),
+      };
+    }),
+  clearAllSpeakers: () =>
+    set((s) => ({
+      segments: s.segments.map((seg) => ({ ...seg, speaker: null })),
+    })),
 
   summary: null,
   setSummary: (summary) => set({ summary }),
@@ -113,12 +201,27 @@ export const useAppStore = create<AppState>((set) => ({
 
   seekTick: 0,
   seekTime: 0,
-  requestSeek: (t) =>
-    set((s) => ({
-      seekTick: s.seekTick + 1,
-      seekTime: t,
-    })),
+  playAfterSeekTick: 0,
+  clearPlayAfterSeek: () => set({ playAfterSeekTick: 0 }),
+  playbackStopAt: null,
+  clearPlaybackStopAt: () => set({ playbackStopAt: null }),
+  requestSeek: (t, opts) =>
+    set((s) => {
+      const playUntil =
+        typeof opts?.playUntil === "number" && Number.isFinite(opts.playUntil) ?
+          opts.playUntil
+        : null;
+      return {
+        seekTick: s.seekTick + 1,
+        seekTime: t,
+        playAfterSeekTick:
+          opts?.play ? s.playAfterSeekTick + 1 : s.playAfterSeekTick,
+        playbackStopAt: playUntil,
+      };
+    }),
 
   aiBusy: false,
   setAiBusy: (aiBusy) => set({ aiBusy }),
+
+  setMediaDuration: (mediaDuration) => set({ mediaDuration }),
 }));

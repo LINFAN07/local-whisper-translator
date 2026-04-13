@@ -1,0 +1,9 @@
+# 選用：說話人分離。請對「本程式使用的」Python 環境安裝：
+#   pip install -r python_service/requirements-speaker.txt
+# 並至 https://huggingface.co/pyannote/speaker-diarization-3.1 等頁面接受使用條款，
+# 並設定 HF_TOKEN（或於程式設定頁填入 Hugging Face 權杖）。
+pyannote.audio>=3.1.1
+torch>=2.1.0
+torchaudio>=2.1.0
+soundfile>=0.12.1
+imageio-ffmpeg>=0.4.9
