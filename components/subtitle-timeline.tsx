@@ -3,36 +3,64 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAppStore } from "@/lib/store";
 import type { TranscriptSegment } from "@/lib/types";
+import { SUBTITLE_MIN_SEGMENT_SECONDS } from "@/lib/subtitle-segment-constants";
+import {
+  getCachedWaveformPeaks,
+  getOrComputeWaveformPeaks,
+  waveformPeaksCacheKey,
+} from "@/lib/waveform-peaks-cache";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-const MIN_SEG = 0.08;
+const MIN_SEG = SUBTITLE_MIN_SEGMENT_SECONDS;
 const EDGE_PX = 8;
 /** 固定時間軸比例（px/秒），不提供使用者調整以避免版面漂移 */
 const FIXED_PX_PER_SEC = 56;
-const WAVEFORM_DECODE_BARS = 2000;
+/** 依音訊長度動態決定解析度，讓「字句間的停頓」不會被低解析度抹平 */
+const WAVEFORM_BARS_PER_SEC = 50;
+const WAVEFORM_BARS_MIN = 2000;
+const WAVEFORM_BARS_MAX = 12000;
+function decideWaveformBars(durationSec: number): number {
+  if (!isFinite(durationSec) || durationSec <= 0) return WAVEFORM_BARS_MIN;
+  const target = Math.round(durationSec * WAVEFORM_BARS_PER_SEC);
+  return Math.max(WAVEFORM_BARS_MIN, Math.min(WAVEFORM_BARS_MAX, target));
+}
 /** 波形區高度（px），與上下字幕軌視覺比例協調 */
 const WAVE_HEIGHT_PX = 72;
+/** 噪聲門檻：低於此相對振幅視為靜音，讓停頓清楚露出 */
+const WAVEFORM_NOISE_FLOOR = 0.025;
 
 function computePeaks(buffer: AudioBuffer, barCount: number): Float32Array {
   const ch = buffer.getChannelData(0);
   const len = ch.length;
   const block = Math.max(1, Math.floor(len / barCount));
   const peaks = new Float32Array(barCount);
+
+  /** 每段取「最大絕對值」（peak），停頓會直接落在 0 附近 */
   for (let i = 0; i < barCount; i++) {
-    let sum = 0;
+    let m = 0;
     const start = i * block;
     const end = Math.min(start + block, len);
     for (let j = start; j < end; j++) {
-      sum += Math.abs(ch[j] ?? 0);
+      const v = Math.abs(ch[j] ?? 0);
+      if (v > m) m = v;
     }
-    peaks[i] = sum / (end - start);
+    peaks[i] = m;
   }
-  let max = 1e-9;
+
+  /**
+   * 用 99 百分位數正規化，避免單一極大尖峰把整體壓矮、停頓細節因此看不見。
+   * 對 barCount 取樣足夠時，partial sort 即可，這裡用 typed array sort 簡化。
+   */
+  const sorted = Float32Array.from(peaks).sort();
+  const idx = Math.max(0, Math.min(sorted.length - 1, Math.floor(sorted.length * 0.99)));
+  const norm = Math.max(1e-6, sorted[idx]!);
   for (let i = 0; i < barCount; i++) {
-    if (peaks[i] > max) max = peaks[i];
+    let v = peaks[i]! / norm;
+    if (v < WAVEFORM_NOISE_FLOOR) v = 0;
+    if (v > 1) v = 1;
+    peaks[i] = v;
   }
-  for (let i = 0; i < barCount; i++) peaks[i] /= max;
   return peaks;
 }
 
@@ -53,13 +81,6 @@ function clampSegment(
   return { start: s, end: e };
 }
 
-function isEditableKeyboardTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  if (target.isContentEditable) return true;
-  const t = target.tagName;
-  return t === "INPUT" || t === "TEXTAREA" || t === "SELECT";
-}
-
 export function SubtitleTimeline() {
   const segments = useAppStore((s) => s.segments);
   const mediaSrc = useAppStore((s) => s.mediaSrc);
@@ -69,8 +90,8 @@ export function SubtitleTimeline() {
   const requestSeek = useAppStore((s) => s.requestSeek);
   const updateSegment = useAppStore((s) => s.updateSegment);
   const pushSegmentTimingUndo = useAppStore((s) => s.pushSegmentTimingUndo);
-  const undoSegmentTiming = useAppStore((s) => s.undoSegmentTiming);
-  const canUndoTiming = useAppStore((s) => s.segmentTimingUndoStack.length > 0);
+  const undoSegmentEdit = useAppStore((s) => s.undoSegmentEdit);
+  const canUndo = useAppStore((s) => s.segmentUndoStack.length > 0);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -120,24 +141,29 @@ export function SubtitleTimeline() {
   }, []);
 
   useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey || e.metaKey) || e.key !== "z" || e.shiftKey) return;
-      if (isEditableKeyboardTarget(e.target)) return;
-      if (useAppStore.getState().segmentTimingUndoStack.length === 0) return;
-      e.preventDefault();
-      useAppStore.getState().undoSegmentTiming();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
-
-  useEffect(() => {
     if (!mediaSrc) {
       setPeaks(null);
       setWaveError(false);
       setWaveLoading(false);
       return;
     }
+    /** 第 3 個參數作為「波形版本」，演算法調整時遞增即可讓舊快取重算 */
+    const cacheKey = waveformPeaksCacheKey(mediaPath, mediaSrc, 3);
+    if (!cacheKey) {
+      setPeaks(null);
+      setWaveError(false);
+      setWaveLoading(false);
+      return;
+    }
+
+    const cached = getCachedWaveformPeaks(cacheKey);
+    if (cached) {
+      setPeaks(cached);
+      setWaveError(false);
+      setWaveLoading(false);
+      return;
+    }
+
     let cancelled = false;
     setWaveError(false);
     setWaveLoading(true);
@@ -145,46 +171,50 @@ export function SubtitleTimeline() {
 
     const toArrayBuffer = (data: ArrayBuffer | Uint8Array): ArrayBuffer => {
       if (data instanceof ArrayBuffer) return data.slice(0);
-      return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+      return data.buffer.slice(
+        data.byteOffset,
+        data.byteOffset + data.byteLength,
+      ) as ArrayBuffer;
     };
 
-    (async () => {
+    void getOrComputeWaveformPeaks(cacheKey, async () => {
+      let buf: ArrayBuffer | null = null;
+      const localPath = mediaPath?.trim();
+      if (localPath && window.electronAPI?.readMediaFile) {
+        const bytes = await window.electronAPI.readMediaFile(localPath);
+        if (bytes && bytes.byteLength > 0) buf = toArrayBuffer(bytes);
+      }
+      if (!buf) {
+        const res = await fetch(mediaSrc);
+        if (!res.ok) throw new Error(`fetch ${res.status}`);
+        buf = await res.arrayBuffer();
+      }
+      if (!buf.byteLength) throw new Error("empty");
+      const ctx = new AudioContext();
+      let audio: AudioBuffer;
       try {
-        let buf: ArrayBuffer | null = null;
-        const localPath = mediaPath?.trim();
-        if (localPath && window.electronAPI?.readMediaFile) {
-          const bytes = await window.electronAPI.readMediaFile(localPath);
-          if (cancelled) return;
-          if (bytes && bytes.byteLength > 0) buf = toArrayBuffer(bytes);
+        audio = await ctx.decodeAudioData(buf.slice(0));
+      } finally {
+        await ctx.close().catch(() => {});
+      }
+      return computePeaks(audio, decideWaveformBars(audio.duration));
+    })
+      .then((p) => {
+        if (!cancelled) {
+          setPeaks(p);
+          setWaveError(false);
         }
-        if (!buf) {
-          const res = await fetch(mediaSrc);
-          if (cancelled) return;
-          if (!res.ok) throw new Error(`fetch ${res.status}`);
-          buf = await res.arrayBuffer();
-        }
-        if (cancelled) return;
-        if (!buf.byteLength) throw new Error("empty");
-
-        const ctx = new AudioContext();
-        let audio: AudioBuffer;
-        try {
-          audio = await ctx.decodeAudioData(buf.slice(0));
-        } finally {
-          await ctx.close().catch(() => {});
-        }
-        if (cancelled) return;
-        setPeaks(computePeaks(audio, WAVEFORM_DECODE_BARS));
-        setWaveError(false);
-      } catch {
+      })
+      .catch(() => {
         if (!cancelled) {
           setPeaks(null);
           setWaveError(true);
         }
-      } finally {
+      })
+      .finally(() => {
         if (!cancelled) setWaveLoading(false);
-      }
-    })();
+      });
+
     return () => {
       cancelled = true;
     };
@@ -209,23 +239,42 @@ export function SubtitleTimeline() {
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, w, h);
 
-    ctx.strokeStyle = "rgba(0, 0, 0, 0.06)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(0, h / 2);
-    ctx.lineTo(w, h / 2);
-    ctx.stroke();
-
     if (peaks && peaks.length > 0) {
-      const barW = w / peaks.length;
+      const n = peaks.length;
       const maxHalf = h / 2 - 6;
-      ctx.fillStyle = "#9ca3af";
-      for (let i = 0; i < peaks.length; i++) {
-        const half = peaks[i] * maxHalf;
-        const x = i * barW;
-        const bw = Math.max(1, barW - 0.35);
-        ctx.fillRect(x, h / 2 - half, bw, half * 2);
-      }
+      const xAt = (i: number) =>
+        n <= 1 ? w / 2 : (i / (n - 1)) * w;
+      const halfAt = (i: number) => peaks[i]! * maxHalf;
+
+      /**
+       * 用每兩點中點作 quadraticCurveTo 控制點，得到圓滑包絡；
+       * 不再做移動平均，避免句子間的停頓被「填平」。
+       */
+      const tracePath = (sign: 1 | -1) => {
+        ctx.beginPath();
+        ctx.moveTo(0, h / 2);
+        ctx.lineTo(xAt(0), h / 2 + sign * halfAt(0));
+        for (let i = 0; i < n - 1; i++) {
+          const cpx = xAt(i);
+          const cpy = h / 2 + sign * halfAt(i);
+          const nx = (xAt(i) + xAt(i + 1)) / 2;
+          const ny = h / 2 + sign * (halfAt(i) + halfAt(i + 1)) / 2;
+          ctx.quadraticCurveTo(cpx, cpy, nx, ny);
+        }
+        ctx.lineTo(xAt(n - 1), h / 2 + sign * halfAt(n - 1));
+        ctx.lineTo(w, h / 2);
+        ctx.closePath();
+      };
+
+      /** 中央極淡基線：靜音段也保留一條淺淺水平痕，讓「停頓」清楚對齊時間軸 */
+      ctx.fillStyle = "rgba(203, 213, 225, 0.35)";
+      ctx.fillRect(0, h / 2 - 0.75, w, 1.5);
+
+      ctx.fillStyle = "rgba(100, 116, 139, 0.85)";
+      tracePath(-1);
+      ctx.fill();
+      tracePath(1);
+      ctx.fill();
     } else if (waveError) {
       ctx.fillStyle = "#71717a";
       ctx.font = "12px system-ui, sans-serif";
@@ -412,7 +461,9 @@ export function SubtitleTimeline() {
             title={`${start.toFixed(2)}s — ${end.toFixed(2)}s · ${text.slice(0, 120)}`}
             onPointerDown={(e) => onBlockPointerDown(e, seg)}
           >
-            <span className="line-clamp-3 break-words">{text}</span>
+            <span className="line-clamp-3 whitespace-pre-line break-words">
+              {text}
+            </span>
           </button>
         );
       })}
@@ -429,9 +480,9 @@ export function SubtitleTimeline() {
               type="button"
               variant="outline"
               size="xs"
-              disabled={!canUndoTiming}
-              title="復原上一次在時間軸上拖曳調整的起訖時間。快捷鍵：Ctrl+Z（macOS：⌘Z）；在輸入框內時不會觸發，以免影響文字復原。"
-              onClick={() => undoSegmentTiming()}
+              disabled={!canUndo}
+              title="復原上一筆字幕編輯（時間軸拖曳，或刪除／合併／拆分）。快捷鍵：Ctrl+Z（macOS：⌘Z）；在輸入框內不觸發，以免影響文字復原。"
+              onClick={() => undoSegmentEdit()}
             >
               復原上一步
             </Button>

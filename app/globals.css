@@ -154,4 +154,45 @@
   html {
     @apply font-sans;
   }
+
+  /**
+   * 原生 <select> 在 Electron／Windows 上若未宣告 color-scheme，下拉選單常出現
+   * 白底＋淺色字。強制與 .dark 主題一致。
+   */
+  html.dark {
+    color-scheme: dark;
+  }
+  html:not(.dark) {
+    color-scheme: light;
+  }
+
+  html.dark select,
+  html:not(.dark) select {
+    background-color: var(--background);
+    color: var(--foreground);
+  }
+  /* 多數 Chromium 上 option 可繼承，改善展開清單可讀性 */
+  html.dark option,
+  html:not(.dark) option {
+    background-color: var(--popover);
+    color: var(--popover-foreground);
+  }
+}
+
+@layer utilities {
+  /** 可捲動但不顯示捲軸（仍可用滾輪、觸控、鍵盤捲動） */
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  /**
+   * Tailwind v3.4 尚未內建 `field-sizing-content` 工具；補一條原生 CSS，
+   * 使 <textarea>／<input> 能依內容自動長高（Chromium 123+／Electron 41+ 支援）。
+   */
+  .field-sizing-content {
+    field-sizing: content;
+  }
 }

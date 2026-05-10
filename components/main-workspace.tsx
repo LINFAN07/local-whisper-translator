@@ -31,7 +31,7 @@ function isYoutubeHttpUrl(s: string): boolean {
   );
 }
 
-export function MainWorkspace() {
+export function MainWorkspace({ isActive = true }: { isActive?: boolean }) {
   const mediaPath = useAppStore((s) => s.mediaPath);
   const mediaSrc = useAppStore((s) => s.mediaSrc);
   const mediaName = useAppStore((s) => s.mediaName);
@@ -42,6 +42,7 @@ export function MainWorkspace() {
   const progress = useAppStore((s) => s.progress);
   const status = useAppStore((s) => s.status);
   const statusMessage = useAppStore((s) => s.statusMessage);
+  const segments = useAppStore((s) => s.segments);
   const clearSegments = useAppStore((s) => s.clearSegments);
   const setProgress = useAppStore((s) => s.setProgress);
   const setStatus = useAppStore((s) => s.setStatus);
@@ -54,6 +55,9 @@ export function MainWorkspace() {
   } | null>(null);
   const [probingYoutube, setProbingYoutube] = useState(false);
   const syncedMediaPathRef = useRef<string | null>(null);
+  /** 避免「開始轉錄」的 useCallback 漏列 urlDraft 導致閉包仍為空字串、靜默失敗 */
+  const urlDraftRef = useRef(urlDraft);
+  urlDraftRef.current = urlDraft;
 
   useEffect(() => {
     const p = mediaPath?.trim() ?? "";
@@ -69,18 +73,19 @@ export function MainWorkspace() {
     }
   }, [mediaPath, mediaSrc]);
 
-  const applyMediaUrl = useCallback(() => {
-    const t = urlDraft.trim();
+  /** 將輸入框的連結寫入 store；無效則設錯誤並回傳 false */
+  const commitMediaUrlFromText = useCallback((raw: string): boolean => {
+    const t = raw.trim();
     if (!t) {
       setStatus("error", "請貼上連結。");
-      return;
+      return false;
     }
     if (!isHttpUrlString(t)) {
       setStatus(
         "error",
         "請貼上有效的 http(s) 連結。常見平台如 YouTube、Bilibili、Vimeo、SoundCloud、Twitch、ニコニコ動畫、Podcast 等，只要可由 yt-dlp 解析且內容可公開存取即可（實際以 yt-dlp 支援清單為準）。",
       );
-      return;
+      return false;
     }
     let label: string;
     try {
@@ -96,6 +101,7 @@ export function MainWorkspace() {
     setSummary(null);
     setProgress(0, "");
     setStatus("idle");
+    return true;
   }, [
     clearSegments,
     setCurrentTaskId,
@@ -104,7 +110,6 @@ export function MainWorkspace() {
     setStatus,
     setSummary,
     setTaskCreatedAt,
-    urlDraft,
   ]);
 
   const loadElectronPath = useCallback(
@@ -189,10 +194,17 @@ export function MainWorkspace() {
   );
 
   const startTranscribe = useCallback(async () => {
-    const pathOrUrl = mediaPath?.trim() ?? "";
+    const draft = urlDraftRef.current.trim();
+    if (draft) {
+      if (!commitMediaUrlFromText(draft)) return;
+    }
+
+    const { mediaPath: pathFromStore, mediaSrc: srcFromStore } =
+      useAppStore.getState();
+    const pathOrUrl = pathFromStore?.trim() ?? "";
     const isRemoteUrl =
       pathOrUrl.startsWith("http://") || pathOrUrl.startsWith("https://");
-    if (!isRemoteUrl && !mediaSrc) return;
+    if (!isRemoteUrl && !srcFromStore) return;
 
     const api = window.electronAPI;
     if (!api?.transcribeStart) {
@@ -203,7 +215,7 @@ export function MainWorkspace() {
       return;
     }
 
-    if (!isRemoteUrl && !mediaPath) {
+    if (!isRemoteUrl && !pathFromStore) {
       setStatus(
         "error",
         "缺少檔案本機路徑。請在桌面版以「選擇檔案」或將檔案拖入區域（勿用瀏覽器另開的預覽分頁選檔）。",
@@ -211,7 +223,7 @@ export function MainWorkspace() {
       return;
     }
 
-    const input = isRemoteUrl ? pathOrUrl : mediaPath!.trim();
+    const input = isRemoteUrl ? pathOrUrl : pathFromStore!.trim();
     if (!input) return;
 
     const useYoutubeProbe =
@@ -246,13 +258,7 @@ export function MainWorkspace() {
     }
 
     await runTranscribeWithOptions(input);
-  }, [
-    mediaPath,
-    mediaSrc,
-    runTranscribeWithOptions,
-    setProgress,
-    setStatus,
-  ]);
+  }, [commitMediaUrlFromText, runTranscribeWithOptions, setProgress, setStatus]);
 
   const cancelTranscribe = useCallback(async () => {
     await window.electronAPI?.transcribeCancel?.();
@@ -316,42 +322,56 @@ export function MainWorkspace() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-lg font-semibold tracking-tight">工作區</h1>
-            <p className="text-sm text-muted-foreground">
-              {mediaName ?? "尚未匯入檔案"}
-            </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              size="sm"
-              className="gap-2"
-              disabled={busy || !canStartTranscribe}
-              onClick={startTranscribe}
-            >
-              <Sparkles className="size-4" />
-              開始轉錄
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={!busy}
-              onClick={cancelTranscribe}
-            >
-              取消
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              className="gap-2"
-              disabled={busy}
-              title="清除目前媒體與逐字稿，回到貼連結／選檔案"
-              onClick={startNewImport}
-            >
-              <FilePlus2 className="size-4" />
-              匯入新檔案
-            </Button>
+            {status === "processing" ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={!busy}
+                onClick={cancelTranscribe}
+              >
+                取消
+              </Button>
+            ) : segments.length === 0 ? (
+              <>
+                <Button
+                  type="button"
+                  size="sm"
+                  className="gap-2"
+                  disabled={busy || (!canStartTranscribe && !urlDraft.trim())}
+                  onClick={startTranscribe}
+                >
+                  <Sparkles className="size-4" />
+                  開始轉錄
+                </Button>
+                {mediaSrc && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={busy}
+                    onClick={startNewImport}
+                  >
+                    回主頁
+                  </Button>
+                )}
+              </>
+            ) : (
+              <Button
+                type="button"
+                size="sm"
+                variant="default"
+                className="gap-2"
+                disabled={busy}
+                title="清除目前媒體與逐字稿，回到貼連結／選檔案"
+                onClick={startNewImport}
+              >
+                <FilePlus2 className="size-4" />
+                匯入新檔案
+              </Button>
+            )}
           </div>
         </div>
 
@@ -366,67 +386,79 @@ export function MainWorkspace() {
 
         {mediaSrc ?
           <Card className="w-full min-w-0 shrink-0 overflow-hidden p-4">
-            <MediaPlayer />
+            {isActive ?
+              <MediaPlayer />
+            : <div className="flex min-h-[140px] items-center justify-center px-4 text-center text-xs text-muted-foreground">
+                目前於「字幕翻譯」工作區。切回「轉錄」可預覽與控制播放。
+              </div>
+            }
           </Card>
-        : <div className="grid w-full min-w-0 shrink-0 gap-4 md:grid-cols-2">
-            <Card className="flex min-h-0 flex-col gap-3 p-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <Link2 className="size-4 shrink-0 text-muted-foreground" />
-                <span className="text-sm font-medium">貼上網址</span>
-              </div>
-              {pendingUrlOnly ? (
-                <div className="rounded-lg border border-primary/30 bg-primary/10 px-3 py-2 text-xs text-foreground">
-                  已套用連結。按下「開始轉錄」將由{" "}
-                  <code className="rounded bg-muted/80 px-1 py-0.5">yt-dlp</code>{" "}
-                  下載至本機，完成後此處會改為媒體預覽並與逐字稿對時。
-                </div>
-              ) : null}
-              <p className="text-xs text-muted-foreground">
-                請安裝{" "}
-                <code className="rounded bg-muted px-1 py-0.5">yt-dlp</code> 與{" "}
-                <code className="rounded bg-muted px-1 py-0.5">ffmpeg</code>
-                。可涵蓋多數常見影音站（YouTube、Bilibili 等，實際以 yt-dlp 為準）；下載與轉錄皆在本機執行。
-                YouTube 若偵測到字幕，開始轉錄前可選擇直接帶入或使用 Whisper。
-              </p>
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                <Input
-                  type="url"
-                  name="media-url"
-                  placeholder="https://…（影片／音訊頁面網址）"
-                  value={urlDraft}
-                  onChange={(e) => setUrlDraft(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") applyMediaUrl();
-                  }}
-                  disabled={busy}
-                  className="sm:flex-1"
-                  autoComplete="off"
-                />
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  disabled={busy}
-                  className="shrink-0"
-                  onClick={applyMediaUrl}
-                >
-                  套用連結
-                </Button>
-              </div>
-            </Card>
-
-            <Card className="flex min-h-0 min-w-0 flex-col gap-2 overflow-hidden p-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <Upload className="size-4 shrink-0 text-muted-foreground" />
-                <span className="text-sm font-medium">本機檔案</span>
-              </div>
+        : <div className="flex flex-1 flex-col items-center justify-center py-8">
+            <div className="relative w-full max-w-xl">
+              {/* 底層 DropZone：負責拖放感應與邏輯 */}
               <DropZone
-                compact
-                disabled={busy}
                 onFiles={onDropFiles}
                 onElectronPaths={loadElectronPath}
+                disabled={busy}
+                openOnSurfaceClick={false}
+                className="absolute inset-0 z-0 opacity-0"
               />
-            </Card>
+
+              {/* 上層視覺卡片：參考圖片設計 */}
+              <Card className="pointer-events-none relative z-10 w-full overflow-hidden border-border/50 bg-card/40 p-10 shadow-2xl">
+                <div className="flex flex-col items-center space-y-8 text-center">
+                  {/* 頂部雙圖示 */}
+                  <div className="flex gap-4">
+                    <div className="flex size-16 items-center justify-center rounded-2xl bg-primary/10 text-primary/80">
+                      <Link2 size={32} />
+                    </div>
+                    <div className="flex size-16 items-center justify-center rounded-2xl bg-primary/10 text-primary/80">
+                      <Upload size={32} />
+                    </div>
+                  </div>
+
+                  {/* 文案區 */}
+                  <div className="space-y-2">
+                    <h2 className="text-xl font-semibold tracking-tight text-foreground">
+                      匯入媒體檔案
+                    </h2>
+                    <p className="text-sm text-muted-foreground">
+                      貼上 YouTube / Bilibili 連結，或直接將檔案拖放到此處
+                    </p>
+                  </div>
+
+                  {/* 網址輸入：需要 pointer-events-auto 讓 Input/Button 可用 */}
+                  <div className="pointer-events-auto flex w-full gap-2">
+                    <Input
+                      type="url"
+                      placeholder="https://..."
+                      value={urlDraft}
+                      onChange={(e) => setUrlDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") startTranscribe();
+                      }}
+                      disabled={busy}
+                      className="h-12 rounded-xl border-border/50 bg-background/50"
+                      autoComplete="off"
+                    />
+                  </div>
+
+                  <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground/40">
+                    OR
+                  </div>
+
+                  {/* 檔案選取：需要 pointer-events-auto */}
+                  <Button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => (DropZone as any).triggerPicker?.()}
+                    className="pointer-events-auto h-12 rounded-xl bg-white px-10 font-semibold text-black hover:bg-slate-100"
+                  >
+                    選擇本機檔案
+                  </Button>
+                </div>
+              </Card>
+            </div>
           </div>
         }
 

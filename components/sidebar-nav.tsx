@@ -2,17 +2,46 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useCallback, useEffect } from "react";
-import { Captions, LayoutDashboard, ListMusic, Settings } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import {
+  Captions,
+  LayoutDashboard,
+  ListMusic,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Settings,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
-import { buttonVariants } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { SidebarHistoryCard } from "@/components/sidebar-history-card";
 import { refreshTasksInStore } from "@/lib/persist-task";
 import { useAppStore } from "@/lib/store";
 import type { AiSummary } from "@/lib/types";
 
+const SIDEBAR_COLLAPSED_KEY = "vt-sidebar-collapsed";
+
 export function SidebarNav() {
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  useEffect(() => {
+    try {
+      if (localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1") {
+        setSidebarCollapsed(true);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const setCollapsedPersisted = useCallback((v: boolean) => {
+    setSidebarCollapsed(v);
+    try {
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, v ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, []);
   const pathname = usePathname();
   const router = useRouter();
   const tasks = useAppStore((s) => s.tasks);
@@ -151,85 +180,130 @@ export function SidebarNav() {
   );
 
   return (
-    <aside className="flex h-full w-[248px] shrink-0 flex-col border-r border-border bg-sidebar text-sidebar-foreground">
-      <div className="flex items-center gap-2 border-b border-sidebar-border px-3 py-3">
-        <div className="flex size-8 items-center justify-center rounded-md bg-sidebar-primary/20 text-sidebar-primary">
-          <ListMusic className="size-4" />
+    <aside
+      className={cn(
+        "flex h-full shrink-0 flex-col border-r border-border bg-sidebar text-sidebar-foreground",
+        sidebarCollapsed ? "w-[52px]" : "w-[248px]",
+      )}
+      aria-label="側邊導航"
+    >
+      {sidebarCollapsed ?
+        <div className="flex flex-col items-center gap-1 border-b border-sidebar-border py-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="shrink-0"
+            title="展開側邊欄"
+            aria-label="展開側邊欄"
+            onClick={() => setCollapsedPersisted(false)}
+          >
+            <PanelLeftOpen className="size-4" />
+          </Button>
+          <div className="flex size-8 items-center justify-center rounded-md bg-sidebar-primary/20 text-sidebar-primary">
+            <ListMusic className="size-4" />
+          </div>
         </div>
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold tracking-tight">
-            語音轉譯
+      : <div className="flex items-center gap-2 border-b border-sidebar-border px-3 py-3">
+          <div className="flex size-8 items-center justify-center rounded-md bg-sidebar-primary/20 text-sidebar-primary">
+            <ListMusic className="size-4" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-semibold tracking-tight">
+              語音轉譯
+            </p>
+            <p className="text-xs text-muted-foreground">本機 Whisper</p>
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="shrink-0"
+            title="收合側邊欄"
+            aria-label="收合側邊欄"
+            onClick={() => setCollapsedPersisted(true)}
+          >
+            <PanelLeftClose className="size-4" />
+          </Button>
+        </div>
+      }
+
+      {!sidebarCollapsed && (
+        <div className="flex min-h-0 flex-1 flex-col px-2 py-2">
+          <p className="shrink-0 px-2 pb-2 text-xs font-medium uppercase text-muted-foreground">
+            歷史紀錄
           </p>
-          <p className="text-xs text-muted-foreground">本機 Whisper</p>
+          <ScrollArea
+            className="min-h-0 flex-1 pr-2"
+            key={tasks.map((t) => t.id).join("|")}
+          >
+            <ul className="space-y-2 pb-1">
+              {tasks.length === 0 ?
+                <li className="px-2 py-2 text-xs text-muted-foreground">
+                  尚無紀錄；轉錄完成會自動儲存於此，亦可手動按「儲存紀錄」更新。
+                </li>
+              : tasks.map((t) => (
+                  <SidebarHistoryCard
+                    key={t.id}
+                    task={t}
+                    onSelect={loadTask}
+                    onDelete={deleteHistoryTask}
+                  />
+                ))
+              }
+            </ul>
+          </ScrollArea>
         </div>
-      </div>
+      )}
 
-      <div className="flex min-h-0 flex-1 flex-col px-2 py-2">
-        <p className="shrink-0 px-2 pb-2 text-xs font-medium uppercase text-muted-foreground">
-          歷史紀錄
-        </p>
-        <ScrollArea
-          className="min-h-0 flex-1 pr-2"
-          key={tasks.map((t) => t.id).join("|")}
-        >
-          <ul className="space-y-2 pb-1">
-            {tasks.length === 0 ?
-              <li className="px-2 py-2 text-xs text-muted-foreground">
-                尚無紀錄；轉錄完成會自動儲存於此，亦可手動按「儲存紀錄」更新。
-              </li>
-            : tasks.map((t) => (
-                <SidebarHistoryCard
-                  key={t.id}
-                  task={t}
-                  onSelect={loadTask}
-                  onDelete={deleteHistoryTask}
-                />
-              ))
-            }
-          </ul>
-        </ScrollArea>
-      </div>
-
-      <div className="mt-auto flex flex-col gap-1 border-t border-sidebar-border p-2">
+      <div
+        className={cn(
+          "mt-auto flex flex-col gap-1 border-t border-sidebar-border",
+          sidebarCollapsed ? "p-1.5" : "p-2",
+        )}
+      >
         <Link
           href="/"
+          title="轉錄"
           className={cn(
             buttonVariants({
               variant:
                 pathname === "/" || pathname === "" ? "secondary" : "ghost",
-              size: "sm",
+              size: sidebarCollapsed ? "icon-sm" : "sm",
             }),
-            "w-full justify-start gap-2",
+            sidebarCollapsed ? "w-full" : "w-full justify-start gap-2",
           )}
         >
           <LayoutDashboard className="size-4 shrink-0" />
-          轉錄
+          {!sidebarCollapsed && "轉錄"}
         </Link>
         <Link
           href="/subtitle"
+          title="字幕翻譯"
           className={cn(
             buttonVariants({
               variant: pathname === "/subtitle" ? "secondary" : "ghost",
-              size: "sm",
+              size: sidebarCollapsed ? "icon-sm" : "sm",
             }),
-            "w-full justify-start gap-2",
+            sidebarCollapsed ? "w-full" : "w-full justify-start gap-2",
           )}
         >
           <Captions className="size-4 shrink-0" />
-          字幕翻譯
+          {!sidebarCollapsed && "字幕翻譯"}
         </Link>
         <Link
           href="/settings"
+          title="設置"
           className={cn(
             buttonVariants({
               variant: pathname === "/settings" ? "secondary" : "ghost",
-              size: "sm",
+              size: sidebarCollapsed ? "icon-sm" : "sm",
             }),
-            "w-full justify-start gap-2",
+            sidebarCollapsed ? "w-full" : "w-full justify-start gap-2",
           )}
         >
           <Settings className="size-4 shrink-0" />
-          設置
+          {!sidebarCollapsed && "設置"}
         </Link>
       </div>
     </aside>

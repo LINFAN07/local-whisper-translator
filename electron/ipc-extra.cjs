@@ -10,6 +10,7 @@ const StoreModule = require("electron-store");
 const Store = StoreModule.default ?? StoreModule;
 const OpenAI = require("openai");
 const Anthropic = require("@anthropic-ai/sdk");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { translate } = require("@vitalets/google-translate-api");
 
 /** @type {Database.Database | null} */
@@ -31,6 +32,9 @@ const settingsStore = new Store({
     whisperDevice: "auto",
     /** Hugging Face token（說話人分離 pyannote 用），僅存本機 */
     huggingfaceToken: "",
+    /** Google AI Studio／Gemini API */
+    geminiApiKey: "",
+    geminiSummaryModel: "gemini-2.0-flash",
   },
 });
 
@@ -471,14 +475,14 @@ ${text.slice(0, 120000)}`;
         }
       };
 
-      const wantAnthropic =
-        provider === "anthropic" ?
-          true
-        : provider === "openai" ?
-          false
-        : settingsStore.get("summaryProvider") === "anthropic";
+      const summaryProv =
+        provider === "openai" ||
+        provider === "anthropic" ||
+        provider === "gemini" ?
+          provider
+        : String(settingsStore.get("summaryProvider") || "openai");
 
-      if (wantAnthropic) {
+      if (summaryProv === "anthropic") {
         const akey = settingsStore.get("anthropicApiKey");
         if (!akey || typeof akey !== "string") {
           return {
@@ -499,6 +503,33 @@ ${text.slice(0, 120000)}`;
           const block = res.content[0];
           const raw =
             block && block.type === "text" ? block.text : "";
+          if (!raw) return { ok: false, error: "API 未回傳內容" };
+          const summary = parseSummaryJson(raw);
+          if (!summary) return { ok: false, error: "無法解析 JSON" };
+          return { ok: true, summary };
+        } catch (e) {
+          return {
+            ok: false,
+            error: e instanceof Error ? e.message : String(e),
+          };
+        }
+      }
+
+      if (summaryProv === "gemini") {
+        const gkey = settingsStore.get("geminiApiKey");
+        if (!gkey || typeof gkey !== "string" || !String(gkey).trim()) {
+          return {
+            ok: false,
+            error: "請在設置中填寫 Google Gemini（Google AI）API Key",
+          };
+        }
+        const modelName =
+          settingsStore.get("geminiSummaryModel") || "gemini-2.0-flash";
+        const genAI = new GoogleGenerativeAI(String(gkey).trim());
+        const mdl = genAI.getGenerativeModel({ model: modelName });
+        try {
+          const result = await mdl.generateContent(promptBase);
+          const raw = result.response.text();
           if (!raw) return { ok: false, error: "API 未回傳內容" };
           const summary = parseSummaryJson(raw);
           if (!summary) return { ok: false, error: "無法解析 JSON" };
@@ -554,22 +585,81 @@ ${text.slice(0, 120000)}`;
   });
 
   ipcMain.handle("ai:translateOpenAI", async (_event, { segments, target }) => {
-    const key = settingsStore.get("openaiApiKey");
-    if (!key) {
-      return { ok: false, error: "請在設置中填寫 OpenAI API Key" };
-    }
-    const model =
-      settingsStore.get("translationModel") || "gpt-4o-mini";
+    const model = String(
+      settingsStore.get("translationModel") || "gpt-4o-mini",
+    );
+    const useGemini = model.toLowerCase().startsWith("gemini");
     const langLabel =
       target === "ja"
         ? "日文"
         : target === "en"
           ? "英文"
           : "繁體中文";
-    const client = new OpenAI({ apiKey: key });
     const list = segments || [];
     const results = [];
     const batchSize = 8;
+
+    const parseLinesJson = (raw) => {
+      if (!raw || typeof raw !== "string") return null;
+      let t = raw.trim();
+      if (t.startsWith("```")) {
+        t = t
+          .replace(/^```(?:json)?\s*/i, "")
+          .replace(/\s*```\s*$/, "");
+      }
+      try {
+        const parsed = JSON.parse(t);
+        return Array.isArray(parsed?.lines) ? parsed.lines : null;
+      } catch {
+        return null;
+      }
+    };
+
+    if (useGemini) {
+      const gkey = settingsStore.get("geminiApiKey");
+      if (!gkey || !String(gkey).trim()) {
+        return {
+          ok: false,
+          error: "已選用 Gemini 翻譯模型，請在設置中填寫 Google Gemini API Key",
+        };
+      }
+      const genAI = new GoogleGenerativeAI(String(gkey).trim());
+      const mdl = genAI.getGenerativeModel({ model });
+      try {
+        for (let i = 0; i < list.length; i += batchSize) {
+          const batch = list.slice(i, i + batchSize);
+          const payload = batch.map((s, j) => `${j + 1}. ${s.text}`).join("\n");
+          const res = await mdl.generateContent(
+            `將以下每一行翻譯成${langLabel}，保持行順序與數量不變。只輸出純 JSON，不要 markdown 區塊。格式：{"lines":["譯文1","譯文2",...]}
+
+${payload}`,
+          );
+          const raw = res.response.text();
+          const lines = parseLinesJson(raw);
+          if (!lines) {
+            return { ok: false, error: "無法解析翻譯 JSON" };
+          }
+          batch.forEach((s, j) => {
+            results.push({
+              id: s.id,
+              text: String(lines[j] ?? ""),
+            });
+          });
+        }
+        return { ok: true, results };
+      } catch (e) {
+        return {
+          ok: false,
+          error: e instanceof Error ? e.message : String(e),
+        };
+      }
+    }
+
+    const key = settingsStore.get("openaiApiKey");
+    if (!key) {
+      return { ok: false, error: "請在設置中填寫 OpenAI API Key" };
+    }
+    const client = new OpenAI({ apiKey: key });
     try {
       for (let i = 0; i < list.length; i += batchSize) {
         const batch = list.slice(i, i + batchSize);
@@ -607,7 +697,7 @@ ${payload}`,
     }
   });
 
-  ipcMain.handle("speaker:assign", async (_event, body) => {
+  ipcMain.handle("speaker:assign", async (event, body) => {
     const mediaPath =
       typeof body?.mediaPath === "string" ? body.mediaPath.trim() : "";
     const segments = body?.segments;
@@ -649,6 +739,27 @@ ${payload}`,
     return await new Promise((resolve) => {
       let outBuf = "";
       let errBuf = "";
+      const wc = event.sender;
+      const safeSend = (payload) => {
+        try {
+          if (wc && !wc.isDestroyed()) {
+            wc.send("speaker:assign-progress", payload);
+          }
+        } catch {
+          /* ignore */
+        }
+      };
+      let logDebounceTimer = null;
+      const flushLog = () => {
+        logDebounceTimer = null;
+        const t = errBuf.slice(-4000);
+        if (t) safeSend({ kind: "log", text: t });
+      };
+      const scheduleLog = () => {
+        if (logDebounceTimer) return;
+        logDebounceTimer = setTimeout(flushLog, 400);
+      };
+
       const pyEnv = {
         ...getSpeakerAssignEnv(),
         PYTHONUTF8: "1",
@@ -680,15 +791,28 @@ ${payload}`,
         return;
       }
 
+      safeSend({ kind: "start" });
+
       speakerAssignProcess.stdout?.on("data", (chunk) => {
         outBuf += chunk.toString("utf8");
       });
       speakerAssignProcess.stderr?.on("data", (chunk) => {
         errBuf += chunk.toString("utf8");
+        scheduleLog();
       });
+
+      const finishProgress = () => {
+        if (logDebounceTimer) {
+          clearTimeout(logDebounceTimer);
+          logDebounceTimer = null;
+        }
+        flushLog();
+        safeSend({ kind: "end" });
+      };
 
       speakerAssignProcess.on("close", (code) => {
         speakerAssignProcess = null;
+        finishProgress();
         try {
           fs.unlinkSync(payloadPath);
         } catch {
@@ -725,6 +849,7 @@ ${payload}`,
 
       speakerAssignProcess.on("error", (err) => {
         speakerAssignProcess = null;
+        finishProgress();
         try {
           fs.unlinkSync(payloadPath);
         } catch {

@@ -77,4 +77,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
   aiTranslateOpenAI: (opts) => ipcRenderer.invoke("ai:translateOpenAI", opts),
 
   assignSpeakers: (opts) => ipcRenderer.invoke("speaker:assign", opts),
+  /** 說話人識別子程序 stderr 摘要（僅執行中推送） */
+  onSpeakerAssignProgress: (cb) => {
+    const handler = (_e, payload) => {
+      cb(payload);
+    };
+    ipcRenderer.on("speaker:assign-progress", handler);
+    return () => {
+      ipcRenderer.removeListener("speaker:assign-progress", handler);
+    };
+  },
 });

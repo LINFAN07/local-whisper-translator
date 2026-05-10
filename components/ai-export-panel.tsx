@@ -12,9 +12,9 @@ export function AiExportPanel() {
   const setSummary = useAppStore((s) => s.setSummary);
   const setAiBusy = useAppStore((s) => s.setAiBusy);
 
-  const [summaryEngine, setSummaryEngine] = useState<"openai" | "anthropic">(
-    "openai",
-  );
+  const [summaryEngine, setSummaryEngine] = useState<
+    "openai" | "anthropic" | "gemini"
+  >("openai");
   /** 須在掛載後再偵測 electronAPI，避免 SSR 為 null、客戶端有內容而 hydration 失敗 */
   const [electronReady, setElectronReady] = useState(false);
 
@@ -26,7 +26,9 @@ export function AiExportPanel() {
     (async () => {
       if (!window.electronAPI?.settingsGet) return;
       const s = await window.electronAPI.settingsGet();
-      if (s.summaryProvider === "anthropic") setSummaryEngine("anthropic");
+      const sp = String(s.summaryProvider ?? "openai");
+      if (sp === "anthropic") setSummaryEngine("anthropic");
+      else if (sp === "gemini") setSummaryEngine("gemini");
       else setSummaryEngine("openai");
     })();
   }, []);
@@ -66,11 +68,14 @@ export function AiExportPanel() {
             className="h-8 rounded-md border border-input bg-background px-2 text-xs"
             value={summaryEngine}
             onChange={(e) =>
-              setSummaryEngine(e.target.value as "openai" | "anthropic")
+              setSummaryEngine(
+                e.target.value as "openai" | "anthropic" | "gemini",
+              )
             }
           >
             <option value="openai">OpenAI</option>
             <option value="anthropic">Claude</option>
+            <option value="gemini">Gemini</option>
           </select>
           <Button
             type="button"

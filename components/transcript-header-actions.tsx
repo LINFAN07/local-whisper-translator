@@ -60,7 +60,12 @@ export function TranscriptHeaderActions() {
     bottom?: number;
   } | null>(null);
   const [copyAck, setCopyAck] = useState(false);
-  const [speakerBusy, setSpeakerBusy] = useState(false);
+  const speakerAssignBusy = useAppStore((s) => s.speakerAssignBusy);
+  const speakerAssignStartedAt = useAppStore((s) => s.speakerAssignStartedAt);
+  const speakerAssignLog = useAppStore((s) => s.speakerAssignLog);
+  const speakerAssignUiTick = useAppStore((s) => s.speakerAssignUiTick);
+  const startSpeakerAssignSession = useAppStore((s) => s.startSpeakerAssignSession);
+  const endSpeakerAssignSession = useAppStore((s) => s.endSpeakerAssignSession);
   const wrapRef = useRef<HTMLDivElement>(null);
   const exportDownloadAnchorRef = useRef<HTMLButtonElement>(null);
   const exportDownloadMenuPanelRef = useRef<HTMLDivElement>(null);
@@ -70,6 +75,16 @@ export function TranscriptHeaderActions() {
   useEffect(() => {
     setElectronReady(typeof window !== "undefined" && !!window.electronAPI);
   }, []);
+
+  const speakerElapsedLabel = useMemo(() => {
+    if (!speakerAssignBusy || speakerAssignStartedAt == null) return "0.0";
+    void speakerAssignUiTick;
+    const sec = (Date.now() - speakerAssignStartedAt) / 1000;
+    if (sec < 120) return sec.toFixed(1);
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${s.toString().padStart(2, "0")}`;
+  }, [speakerAssignBusy, speakerAssignStartedAt, speakerAssignUiTick]);
 
   useEffect(() => {
     if (!openMenu) return;
@@ -306,18 +321,25 @@ export function TranscriptHeaderActions() {
   const runAssignSpeakers = useCallback(async () => {
     const api = window.electronAPI;
     if (!api?.assignSpeakers) return;
-    if (!mediaPath?.trim()) {
+    const pathTrim = mediaPath?.trim() ?? "";
+    if (!pathTrim) {
       alert("需要本機媒體檔路徑才能識別說話人（請由檔案或歷史紀錄載入含媒體的逐字稿）。");
+      return;
+    }
+    if (pathTrim.startsWith("http://") || pathTrim.startsWith("https://")) {
+      alert(
+        "說話人識別需要本機音訊／影片檔。目前媒體仍是網址：請確認轉錄已完成並已載入本機暫存檔（狀態列應已出現播放器），或改以「選擇本機檔案」匯入後再試。",
+      );
       return;
     }
     if (segments.length === 0) {
       alert("沒有段落可標註");
       return;
     }
-    setSpeakerBusy(true);
+    startSpeakerAssignSession();
     try {
       const res = await api.assignSpeakers({
-        mediaPath: mediaPath.trim(),
+        mediaPath: pathTrim,
         segments: segments.map((s) => ({
           id: s.id,
           start: s.start,
@@ -332,9 +354,15 @@ export function TranscriptHeaderActions() {
         res.updates.map((u) => ({ id: u.id, speaker: u.speaker })),
       );
     } finally {
-      setSpeakerBusy(false);
+      endSpeakerAssignSession();
     }
-  }, [mediaPath, segments, setSegmentSpeakers]);
+  }, [
+    mediaPath,
+    segments,
+    setSegmentSpeakers,
+    startSpeakerAssignSession,
+    endSpeakerAssignSession,
+  ]);
 
   if (!electronReady) return null;
 
@@ -343,12 +371,17 @@ export function TranscriptHeaderActions() {
   );
   const disabledNoSeg = segments.length === 0;
   const transcribing = status === "processing";
-  const hasLocalMedia = Boolean(mediaPath?.trim());
+  const mediaPathTrim = mediaPath?.trim() ?? "";
+  const hasMediaPath = Boolean(mediaPathTrim);
+  const isRemoteOnlyPath =
+    mediaPathTrim.startsWith("http://") || mediaPathTrim.startsWith("https://");
+  /** pyannote 需要本機檔；僅有 http(s) 字串時主進程也無法 existsSync */
+  const canRunSpeakerDiarization = hasMediaPath && !isRemoteOnlyPath;
   const speakerIdentifyDisabled =
     disabledNoSeg ||
     transcribing ||
-    !hasLocalMedia ||
-    speakerBusy ||
+    !canRunSpeakerDiarization ||
+    speakerAssignBusy ||
     aiBusy;
 
   const menuClass =
@@ -367,8 +400,10 @@ export function TranscriptHeaderActions() {
           aria-expanded={openMenu === "speaker"}
           title={
             disabledNoSeg ? "請先完成轉錄" : (
-              !hasLocalMedia ?
-                "需本機媒體檔（非僅連結暫存）才能分析語者"
+              speakerAssignBusy ?
+                `說話人識別進行中（${speakerElapsedLabel}）`
+              : !canRunSpeakerDiarization ?
+                "需本機媒體檔（網址尚未對應到本機暫存檔時無法分析語者）"
               : transcribing ?
                 "轉錄進行中"
               : aiBusy ?
@@ -382,6 +417,11 @@ export function TranscriptHeaderActions() {
         >
           <Users className="size-3.5" />
           說話人
+          {speakerAssignBusy ?
+            <span className="rounded bg-amber-500/25 px-1 font-mono text-[10px] leading-none text-amber-200 tabular-nums">
+              {speakerElapsedLabel}
+            </span>
+          : null}
           <ChevronDown className="size-3.5 opacity-70" />
         </Button>
         {openMenu === "speaker" && !disabledNoSeg ?
@@ -393,6 +433,18 @@ export function TranscriptHeaderActions() {
                 Face 權杖並接受模型條款，另請安裝{" "}
                 <code className="rounded bg-muted px-0.5">requirements-speaker.txt</code>。
               </p>
+              {speakerAssignBusy ?
+                <p className="text-[11px] leading-snug text-amber-200/90">
+                  已執行 {speakerElapsedLabel}（計時約每 0.25
+                  秒更新，數字會變動代表介面仍在運作）。首次下載／載入模型與較長音檔可能需數分鐘；下方為
+                  Python 輸出摘要。
+                </p>
+              : null}
+              {speakerAssignBusy && speakerAssignLog.trim() ?
+                <pre className="max-h-28 overflow-auto rounded border border-border/80 bg-background/80 p-2 font-mono text-[10px] leading-relaxed text-muted-foreground whitespace-pre-wrap break-all">
+                  {speakerAssignLog}
+                </pre>
+              : null}
               <Button
                 type="button"
                 size="sm"
@@ -404,7 +456,7 @@ export function TranscriptHeaderActions() {
                 }}
               >
                 <Sparkles className="size-3.5" />
-                {speakerBusy ? "識別中…" : "執行說話人識別"}
+                {speakerAssignBusy ? "識別中…" : "執行說話人識別"}
               </Button>
               <Button
                 type="button"

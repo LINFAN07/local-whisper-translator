@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState, useEffect } from "react";
 import { Upload, FolderOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -13,26 +13,39 @@ type Props = {
   disabled?: boolean;
   /** 與「貼上網址」並排時較矮的版面 */
   compact?: boolean;
+  className?: string;
+  /**
+   * 若為 false：僅能透過內建「選擇檔案」按鈕、triggerPicker，或拖放檔案；
+   * 點擊拖放區背景不會開啟系統選檔（供與 pointer-events-none 卡片疊用時避免誤觸）。
+   */
+  openOnSurfaceClick?: boolean;
 };
 
-export function DropZone({ onFiles, onElectronPaths, disabled, compact }: Props) {
+export function DropZone({
+  onFiles,
+  onElectronPaths,
+  disabled,
+  compact,
+  className,
+  openOnSurfaceClick = true,
+}: Props) {
   const [over, setOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const openFilePicker = useCallback(async () => {
-      if (disabled) return;
-      if (typeof window !== "undefined" && window.electronAPI?.openFileDialog) {
-        const p = await window.electronAPI.openFileDialog();
-        if (p) onElectronPaths?.([p]);
-        return;
-      }
-      const input = document.createElement("input");
-      input.type = "file";
-      input.accept = ACCEPT;
-      input.onchange = () => {
-        if (input.files?.length) onFiles(input.files);
-      };
-      input.click();
-  }, [disabled, onElectronPaths, onFiles]);
+    if (disabled) return;
+    if (typeof window !== "undefined" && window.electronAPI?.openFileDialog) {
+      const p = await window.electronAPI.openFileDialog();
+      if (p) onElectronPaths?.([p]);
+      return;
+    }
+    fileInputRef.current?.click();
+  }, [disabled, onElectronPaths]);
+
+  /** 供外部（如整合式卡片）手動觸發選檔 */
+  useEffect(() => {
+    (DropZone as any).triggerPicker = openFilePicker;
+  }, [openFilePicker]);
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
@@ -78,8 +91,11 @@ export function DropZone({ onFiles, onElectronPaths, disabled, compact }: Props)
         compact ?
           "min-h-[200px] px-4 py-6 sm:min-h-[220px]"
         : "min-h-[280px] px-6 py-10",
-        over && "border-primary/60 bg-muted/50",
-        disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer",
+        over && "border-primary/60 bg-muted/50 ring-4 ring-primary/10",
+        disabled ? "cursor-not-allowed opacity-60"
+        : openOnSurfaceClick ? "cursor-pointer"
+        : "cursor-default",
+        className
       )}
       onDragOver={(e) => {
         e.preventDefault();
@@ -87,11 +103,15 @@ export function DropZone({ onFiles, onElectronPaths, disabled, compact }: Props)
       }}
       onDragLeave={() => setOver(false)}
       onDrop={handleDrop}
-      onClick={(e) => {
-        if (disabled) return;
-        if ((e.target as HTMLElement).closest("button")) return;
-        void openFilePicker();
-      }}
+      onClick={
+        openOnSurfaceClick ?
+          (e) => {
+            if (disabled) return;
+            if ((e.target as HTMLElement).closest("button")) return;
+            void openFilePicker();
+          }
+        : undefined
+      }
     >
       <div
         className={cn(
@@ -130,6 +150,15 @@ export function DropZone({ onFiles, onElectronPaths, disabled, compact }: Props)
         <FolderOpen className="size-4" />
         選擇檔案
       </Button>
+      <input
+        type="file"
+        ref={fileInputRef}
+        className="hidden"
+        accept={ACCEPT}
+        onChange={(e) => {
+          if (e.target.files?.length) onFiles(e.target.files);
+        }}
+      />
     </div>
   );
 }

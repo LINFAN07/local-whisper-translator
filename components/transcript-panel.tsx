@@ -97,8 +97,12 @@ export function TranscriptPanel() {
                 seg.start,
                 seg.end,
               );
+              /**
+               * 依內容自動長高：移除最小高度與 rows，靠 shadcn Textarea 的
+               * field-sizing-content 自動貼合單行字；多行時會自然增高。
+               */
               const transcriptTextareaClass = cn(
-                "min-h-[2.75rem] resize-y border-transparent bg-transparent py-1.5 text-sm leading-relaxed shadow-none transition-[color,box-shadow,background-color,border-color]",
+                "min-h-0 resize-none border-transparent bg-transparent py-1 text-sm leading-relaxed shadow-none transition-[color,box-shadow,background-color,border-color]",
                 "hover:border-border/80 hover:bg-muted/40",
                 "focus-visible:border-input focus-visible:bg-background focus-visible:ring-2 focus-visible:ring-ring/40",
                 active ? "text-foreground" : "text-foreground/95",
@@ -174,7 +178,7 @@ export function TranscriptPanel() {
                         onChange={(e) =>
                           updateSegment(seg.id, { text: e.target.value })
                         }
-                        rows={2}
+                        rows={1}
                         className={transcriptTextareaClass}
                         aria-label="原文"
                       />
@@ -186,7 +190,7 @@ export function TranscriptPanel() {
                           })
                         }
                         placeholder="—"
-                        rows={2}
+                        rows={1}
                         className={translationTextareaClass}
                         aria-label="譯文"
                       />
@@ -196,7 +200,7 @@ export function TranscriptPanel() {
                       onChange={(e) =>
                         updateSegment(seg.id, { text: e.target.value })
                       }
-                      rows={3}
+                      rows={1}
                       className={transcriptTextareaClass}
                       aria-label="逐字稿"
                     />}

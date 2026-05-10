@@ -1,4 +1,16 @@
 const { app, BrowserWindow, ipcMain, dialog, session, protocol } = require("electron");
+
+/**
+ * Windows 上部分驅動／DWM／Chromium GPU 組合會讓視窗無法合成（整片全黑）。
+ * 預設關閉 GPU 相關路徑；需要硬體加速時請設 ELECTRON_ENABLE_GPU=1。
+ * （僅 appendSwitch 還不夠時，disableHardwareAcceleration 仍須保留。）
+ */
+if (process.platform === "win32" && process.env.ELECTRON_ENABLE_GPU !== "1") {
+  app.commandLine.appendSwitch("disable-gpu");
+  app.commandLine.appendSwitch("disable-gpu-sandbox");
+  app.commandLine.appendSwitch("disable-direct-composition");
+  app.disableHardwareAcceleration();
+}
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -188,12 +200,47 @@ function createWindow() {
       sandbox: false,
       // 允許從 http://localhost 載入的頁面播放本機 file:// 媒體（僅建議用於本機工具）
       webSecurity: false,
+      backgroundThrottling: false,
     },
+    /**
+     * 延遲顯示到第一幀可繪製，減少白／黑閃爍；若從未觸發 ready-to-show（極少見）仍會顯示視窗。
+     */
+    show: false,
   });
+
+  mainWindow.once("ready-to-show", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+    }
+  });
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+      mainWindow.show();
+    }
+  }, 8000);
 
   if (isDev) {
     const devUrl =
       process.env.ELECTRON_DEV_SERVER_URL || "http://127.0.0.1:3001";
+    const devOriginRe = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?/i;
+
+    /**
+     * 分離式 DevTools 在部分 Windows 顯示環境會干擾主視窗合成，導致主窗全黑。
+     * 需要除錯時請設 ELECTRON_OPEN_DEVTOOLS=1（或於選單／快捷鍵手動開啟）。
+     */
+    const attachDevToolsWhenNextLoaded = () => {
+      if (process.env.ELECTRON_OPEN_DEVTOOLS !== "1") return;
+      const onFinish = () => {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        const u = mainWindow.webContents.getURL();
+        if (devOriginRe.test(u)) {
+          mainWindow.webContents.removeListener("did-finish-load", onFinish);
+          mainWindow.webContents.openDevTools({ mode: "detach" });
+        }
+      };
+      mainWindow.webContents.on("did-finish-load", onFinish);
+    };
+
     void mainWindow.loadURL(loadElectronWaitHtml(devUrl));
 
     void (async () => {
@@ -201,7 +248,9 @@ function createWindow() {
       if (!mainWindow || mainWindow.isDestroyed()) return;
       if (!ok) {
         await mainWindow.loadURL(loadElectronErrorHtml(devUrl));
-        mainWindow.webContents.openDevTools({ mode: "detach" });
+        if (process.env.ELECTRON_OPEN_DEVTOOLS === "1") {
+          mainWindow.webContents.openDevTools({ mode: "detach" });
+        }
         return;
       }
       /**
@@ -209,7 +258,15 @@ function createWindow() {
        * Next dev（Turbopack）首次編譯 / 可能需很久，期間會一直卡在上方「連線中」畫面。
        * 改為開始導向後即結束等待，讓畫面尽快顯示 Next 自己的載入／編譯畫面。
        */
-      mainWindow.webContents.openDevTools({ mode: "detach" });
+      attachDevToolsWhenNextLoaded();
+      mainWindow.webContents.once("did-fail-load", (_e, errorCode, _desc, url, isMainFrame) => {
+        if (!isMainFrame || !mainWindow || mainWindow.isDestroyed()) return;
+        /** -3：ERR_ABORTED（例如被另一個導向取代），不視為載入失敗 */
+        if (errorCode === -3) return;
+        if (typeof url === "string" && url.startsWith(devUrl)) {
+          void mainWindow.loadURL(loadElectronErrorHtml(devUrl));
+        }
+      });
       mainWindow.loadURL(devUrl).catch(() => {
         if (mainWindow && !mainWindow.isDestroyed()) {
           void mainWindow.loadURL(loadElectronErrorHtml(devUrl));

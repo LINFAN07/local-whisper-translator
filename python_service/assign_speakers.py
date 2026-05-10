@@ -136,6 +136,37 @@ def _overlap_seconds(t0: float, t1: float, s0: float, s1: float) -> float:
     return 0.0
 
 
+def _log_phase(msg: str) -> None:
+    print(f"[assign_speakers] {msg}", file=sys.stderr, flush=True)
+
+
+def _pyannote_waveform_input(wav_path: str) -> dict:
+    """以記憶體波形餵給 pipeline，避開 Windows 上 torchcodec 異常時未定義的 AudioDecoder。"""
+    import torch  # type: ignore
+
+    try:
+        import soundfile as sf  # type: ignore
+    except ImportError as e:
+        raise RuntimeError(
+            "需要 soundfile 以載入 WAV。請執行：pip install -r python_service/requirements-speaker.txt"
+        ) from e
+
+    data, sr = sf.read(wav_path, dtype="float32", always_2d=True)
+    if data.size == 0:
+        raise ValueError("音訊檔無樣本資料。")
+    t = torch.as_tensor(data, dtype=torch.float32)
+    if t.shape[1] > 1:
+        t = t.mean(dim=1, keepdim=True)
+    waveform = t.transpose(0, 1).contiguous()
+    return {"waveform": waveform, "sample_rate": int(sr)}
+
+
+def _diarization_annotation(diarization_out) -> object:
+    """pyannote 3.1+ 預設回傳 DiarizeOutput；legacy 模式才直接回傳 Annotation。"""
+    ann = getattr(diarization_out, "speaker_diarization", None)
+    return ann if ann is not None else diarization_out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -203,6 +234,8 @@ def main() -> int:
     else:
         wav_path = media_path
 
+    _log_phase("音訊就緒，準備載入 pyannote 管道（首次執行可能下載模型，需較久）…")
+
     try:
         try:
             try:
@@ -224,6 +257,8 @@ def main() -> int:
             )
             return 1
 
+        _log_phase("管道已載入，正在將模型放到運算裝置…")
+
         try:
             import torch  # type: ignore
 
@@ -232,10 +267,10 @@ def main() -> int:
         except Exception:
             pass
 
+        _log_phase("開始對音訊做說話人分離（長音檔可能需數分鐘）…")
+
         try:
-            diarization = pipeline(wav_path)
-        except TypeError:
-            diarization = pipeline({"audio": wav_path})
+            raw_diarization = pipeline(_pyannote_waveform_input(wav_path))
         except Exception as e:
             emit_result(
                 {
@@ -245,9 +280,24 @@ def main() -> int:
             )
             return 1
 
+        annotation = _diarization_annotation(raw_diarization)
+        if not hasattr(annotation, "itertracks"):
+            emit_result(
+                {
+                    "ok": False,
+                    "error": (
+                        "說話人分離回傳了無法解讀的型別；請確認 pyannote.audio>=3.1 "
+                        f"且模型為 speaker-diarization-3.1（實際型別：{type(raw_diarization).__name__}）。"
+                    ),
+                }
+            )
+            return 1
+
+        _log_phase("分離完成，正在對齊逐字稿段落…")
+
         turns: list[tuple[float, float, str]] = []
         try:
-            for turn, _track, speaker in diarization.itertracks(yield_label=True):
+            for turn, _track, speaker in annotation.itertracks(yield_label=True):
                 lab = str(speaker) if speaker is not None else "UNKNOWN"
                 turns.append((float(turn.start), float(turn.end), lab))
         except Exception as e:

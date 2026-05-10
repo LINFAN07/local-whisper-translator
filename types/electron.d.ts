@@ -78,7 +78,7 @@ export interface ElectronAPI {
   aiSummarize: (opts: {
     transcript: string;
     /** 未傳則依設置頁「預設摘要引擎」 */
-    provider?: "openai" | "anthropic";
+    provider?: "openai" | "anthropic" | "gemini";
   }) => Promise<
     | { ok: true; summary: AiSummary }
     | { ok: false; error: string }
@@ -111,6 +111,13 @@ export interface ElectronAPI {
     updates?: { id: string; speaker: string }[];
     error?: string;
   }>;
+
+  onSpeakerAssignProgress: (
+    cb: (payload: {
+      kind: "start" | "log" | "end";
+      text?: string;
+    }) => void,
+  ) => () => void;
 }
 
 declare global {

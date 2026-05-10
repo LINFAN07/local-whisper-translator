@@ -1,13 +1,47 @@
 import { create } from "zustand";
 import type { AiSummary, TranscriptSegment, TaskItem } from "@/lib/types";
+import { SUBTITLE_MIN_SEGMENT_SECONDS } from "@/lib/subtitle-segment-constants";
 
-const MAX_SEGMENT_TIMING_UNDO = 80;
+const MAX_SEGMENT_UNDO = 80;
+
+function cloneSegments(segments: TranscriptSegment[]): TranscriptSegment[] {
+  return segments.map((s) => ({ ...s }));
+}
+
+function newSegmentId(): string {
+  return `seg-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function joinSegmentText(a: string, b: string): string {
+  const ta = a.trim();
+  const tb = b.trim();
+  if (!ta) return b;
+  if (!tb) return a;
+  return `${ta} ${tb}`;
+}
+
+function mergeSpeaker(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): string | null {
+  const sa = a?.trim() ?? "";
+  const sb = b?.trim() ?? "";
+  if (!sa || !sb) return null;
+  if (sa.toUpperCase() === "UNKNOWN" || sb.toUpperCase() === "UNKNOWN")
+    return null;
+  if (sa === sb) return sa;
+  return null;
+}
 
 export type SegmentTimingUndoEntry = {
   id: string;
   start: number;
   end: number;
 };
+
+export type SegmentUndoEntry =
+  | ({ type: "timing" } & SegmentTimingUndoEntry)
+  | { type: "structure"; segments: TranscriptSegment[] };
 
 interface AppState {
   tasks: TaskItem[];
@@ -46,11 +80,17 @@ interface AppState {
     >,
   ) => void;
 
-  /** 時間軸拖曳調整起訖後可復原（與文字編輯分開） */
-  segmentTimingUndoStack: SegmentTimingUndoEntry[];
+  deleteSegment: (id: string) => void;
+  mergeSegmentWithNext: (id: string) => boolean;
+  mergeSegmentWithPrev: (id: string) => boolean;
+  /** 以目前播放頭為切點；成功為 true，播放頭須落在句內有效區間 */
+  splitSegmentAtPlayhead: (id: string) => boolean;
+
+  /** 時間軸拖曳與刪除／合併／拆分等結構變更，依操作順序 LIFO 復原 */
+  segmentUndoStack: SegmentUndoEntry[];
   pushSegmentTimingUndo: (entry: SegmentTimingUndoEntry) => void;
-  /** 復原最近一次時間軸調整；若對應句段已不存在則僅彈出該筆紀錄 */
-  undoSegmentTiming: () => boolean;
+  /** 復原上一筆（時間軸或字幕結構）；若時間軸目標句已刪則僅彈出該筆 */
+  undoSegmentEdit: () => boolean;
 
   mediaDuration: number | null;
   setMediaDuration: (seconds: number | null) => void;
@@ -76,9 +116,51 @@ interface AppState {
 
   aiBusy: boolean;
   setAiBusy: (v: boolean) => void;
+
+  /** 說話人識別（pyannote）跨面板共用；兩處 TranscriptHeaderActions 共用同一份狀態 */
+  speakerAssignBusy: boolean;
+  speakerAssignStartedAt: number | null;
+  speakerAssignLog: string;
+  /** 僅用於驅動 UI 週期重繪（與 startedAt 搭配顯示經過時間） */
+  speakerAssignUiTick: number;
+  startSpeakerAssignSession: () => void;
+  endSpeakerAssignSession: () => void;
+  applySpeakerAssignIpc: (p: {
+    kind: "start" | "log" | "end";
+    text?: string;
+  }) => void;
 }
 
-export const useAppStore = create<AppState>((set) => ({
+let speakerAssignIpcUnsub: (() => void) | null = null;
+let speakerAssignTickTimer: ReturnType<typeof setInterval> | null = null;
+
+function ensureSpeakerAssignIpc() {
+  if (typeof window === "undefined") return;
+  if (speakerAssignIpcUnsub) return;
+  const api = window.electronAPI;
+  if (!api?.onSpeakerAssignProgress) return;
+  speakerAssignIpcUnsub = api.onSpeakerAssignProgress((p) => {
+    useAppStore.getState().applySpeakerAssignIpc(p);
+  });
+}
+
+function startSpeakerAssignUiTicker() {
+  if (speakerAssignTickTimer != null) return;
+  speakerAssignTickTimer = setInterval(() => {
+    useAppStore.setState((s) => ({
+      speakerAssignUiTick: s.speakerAssignUiTick + 1,
+    }));
+  }, 250);
+}
+
+function stopSpeakerAssignUiTicker() {
+  if (speakerAssignTickTimer != null) {
+    clearInterval(speakerAssignTickTimer);
+    speakerAssignTickTimer = null;
+  }
+}
+
+export const useAppStore = create<AppState>((set, get) => ({
   tasks: [],
   setTasks: (tasks) => set({ tasks }),
   addTask: (name) =>
@@ -109,7 +191,7 @@ export const useAppStore = create<AppState>((set) => ({
       mediaName: name,
       mediaDuration: null,
       playbackStopAt: null,
-      segmentTimingUndoStack: [],
+      segmentUndoStack: [],
     }),
 
   progress: 0,
@@ -126,35 +208,43 @@ export const useAppStore = create<AppState>((set) => ({
         ...s.segments,
         {
           ...seg,
-          id: `seg-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+          id: newSegmentId(),
         },
       ],
     })),
   clearSegments: () =>
-    set({ segments: [], playbackStopAt: null, segmentTimingUndoStack: [] }),
+    set({ segments: [], playbackStopAt: null, segmentUndoStack: [] }),
   replaceSegments: (segments) =>
-    set({ segments, playbackStopAt: null, segmentTimingUndoStack: [] }),
-  segmentTimingUndoStack: [],
+    set({ segments, playbackStopAt: null, segmentUndoStack: [] }),
+  segmentUndoStack: [],
   pushSegmentTimingUndo: (entry) =>
     set((s) => ({
-      segmentTimingUndoStack: [
-        ...s.segmentTimingUndoStack,
-        entry,
-      ].slice(-MAX_SEGMENT_TIMING_UNDO),
+      segmentUndoStack: [
+        ...s.segmentUndoStack,
+        { type: "timing" as const, ...entry },
+      ].slice(-MAX_SEGMENT_UNDO),
     })),
-  undoSegmentTiming: () => {
+  undoSegmentEdit: () => {
     let applied = false;
     set((s) => {
-      if (s.segmentTimingUndoStack.length === 0) return s;
-      const snap = s.segmentTimingUndoStack[s.segmentTimingUndoStack.length - 1]!;
-      const stack = s.segmentTimingUndoStack.slice(0, -1);
-      const seg = s.segments.find((x) => x.id === snap.id);
-      if (!seg) return { segmentTimingUndoStack: stack };
+      if (s.segmentUndoStack.length === 0) return s;
+      const top = s.segmentUndoStack[s.segmentUndoStack.length - 1]!;
+      const stack = s.segmentUndoStack.slice(0, -1);
+      if (top.type === "structure") {
+        applied = true;
+        return {
+          segmentUndoStack: stack,
+          segments: cloneSegments(top.segments),
+          playbackStopAt: null,
+        };
+      }
+      const seg = s.segments.find((x) => x.id === top.id);
+      if (!seg) return { segmentUndoStack: stack };
       applied = true;
       return {
-        segmentTimingUndoStack: stack,
+        segmentUndoStack: stack,
         segments: s.segments.map((x) =>
-          x.id === snap.id ? { ...x, start: snap.start, end: snap.end } : x,
+          x.id === top.id ? { ...x, start: top.start, end: top.end } : x,
         ),
       };
     });
@@ -166,6 +256,121 @@ export const useAppStore = create<AppState>((set) => ({
         seg.id === id ? { ...seg, ...patch } : seg,
       ),
     })),
+
+  deleteSegment: (id) =>
+    set((s) => ({
+      segmentUndoStack: [
+        ...s.segmentUndoStack,
+        { type: "structure" as const, segments: cloneSegments(s.segments) },
+      ].slice(-MAX_SEGMENT_UNDO),
+      segments: s.segments.filter((seg) => seg.id !== id),
+      playbackStopAt: null,
+    })),
+
+  mergeSegmentWithNext: (id) => {
+    const s = get();
+    const i = s.segments.findIndex((x) => x.id === id);
+    if (i < 0 || i >= s.segments.length - 1) return false;
+    const a = s.segments[i]!;
+    const b = s.segments[i + 1]!;
+    const merged: TranscriptSegment = {
+      id: newSegmentId(),
+      start: a.start,
+      end: b.end,
+      text: joinSegmentText(a.text, b.text),
+      translatedText: joinSegmentText(
+        a.translatedText ?? "",
+        b.translatedText ?? "",
+      ),
+      speaker: mergeSpeaker(a.speaker, b.speaker),
+    };
+    if (!merged.translatedText?.trim()) merged.translatedText = null;
+    set({
+      segmentUndoStack: [
+        ...s.segmentUndoStack,
+        { type: "structure" as const, segments: cloneSegments(s.segments) },
+      ].slice(-MAX_SEGMENT_UNDO),
+      segments: [...s.segments.slice(0, i), merged, ...s.segments.slice(i + 2)],
+      playbackStopAt: null,
+    });
+    return true;
+  },
+
+  mergeSegmentWithPrev: (id) => {
+    const s = get();
+    const i = s.segments.findIndex((x) => x.id === id);
+    if (i <= 0) return false;
+    const a = s.segments[i - 1]!;
+    const b = s.segments[i]!;
+    const merged: TranscriptSegment = {
+      id: newSegmentId(),
+      start: a.start,
+      end: b.end,
+      text: joinSegmentText(a.text, b.text),
+      translatedText: joinSegmentText(
+        a.translatedText ?? "",
+        b.translatedText ?? "",
+      ),
+      speaker: mergeSpeaker(a.speaker, b.speaker),
+    };
+    if (!merged.translatedText?.trim()) merged.translatedText = null;
+    set({
+      segmentUndoStack: [
+        ...s.segmentUndoStack,
+        { type: "structure" as const, segments: cloneSegments(s.segments) },
+      ].slice(-MAX_SEGMENT_UNDO),
+      segments: [
+        ...s.segments.slice(0, i - 1),
+        merged,
+        ...s.segments.slice(i + 1),
+      ],
+      playbackStopAt: null,
+    });
+    return true;
+  },
+
+  splitSegmentAtPlayhead: (id) => {
+    const s = get();
+    const i = s.segments.findIndex((x) => x.id === id);
+    if (i < 0) return false;
+    const seg = s.segments[i]!;
+    const t = s.playbackTime;
+    const lo = seg.start + SUBTITLE_MIN_SEGMENT_SECONDS;
+    const hi = seg.end - SUBTITLE_MIN_SEGMENT_SECONDS;
+    if (!(t > lo && t < hi)) return false;
+    const sp = seg.speaker;
+    const first: TranscriptSegment = {
+      id: newSegmentId(),
+      start: seg.start,
+      end: t,
+      text: seg.text,
+      translatedText: seg.translatedText ?? null,
+      speaker: sp,
+    };
+    const second: TranscriptSegment = {
+      id: newSegmentId(),
+      start: t,
+      end: seg.end,
+      text: "",
+      translatedText: null,
+      speaker: sp,
+    };
+    set({
+      segmentUndoStack: [
+        ...s.segmentUndoStack,
+        { type: "structure" as const, segments: cloneSegments(s.segments) },
+      ].slice(-MAX_SEGMENT_UNDO),
+      segments: [
+        ...s.segments.slice(0, i),
+        first,
+        second,
+        ...s.segments.slice(i + 1),
+      ],
+      playbackStopAt: null,
+    });
+    return true;
+  },
+
   setSegmentTranslations: (updates) =>
     set((s) => {
       const map = new Map(updates.map((u) => [u.id, u.text]));
@@ -222,6 +427,35 @@ export const useAppStore = create<AppState>((set) => ({
 
   aiBusy: false,
   setAiBusy: (aiBusy) => set({ aiBusy }),
+
+  speakerAssignBusy: false,
+  speakerAssignStartedAt: null,
+  speakerAssignLog: "",
+  speakerAssignUiTick: 0,
+  startSpeakerAssignSession: () => {
+    ensureSpeakerAssignIpc();
+    startSpeakerAssignUiTicker();
+    set({
+      speakerAssignBusy: true,
+      speakerAssignStartedAt: Date.now(),
+      speakerAssignLog: "",
+      speakerAssignUiTick: 0,
+    });
+  },
+  endSpeakerAssignSession: () => {
+    stopSpeakerAssignUiTicker();
+    set({
+      speakerAssignBusy: false,
+      speakerAssignStartedAt: null,
+      speakerAssignLog: "",
+    });
+  },
+  applySpeakerAssignIpc: (p) => {
+    if (p.kind === "start") set({ speakerAssignLog: "" });
+    else if (p.kind === "log" && typeof p.text === "string") {
+      set({ speakerAssignLog: p.text });
+    }
+  },
 
   setMediaDuration: (mediaDuration) => set({ mediaDuration }),
 }));

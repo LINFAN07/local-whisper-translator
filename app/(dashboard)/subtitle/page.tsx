@@ -1,9 +1,4 @@
-import { SubtitleWorkspace } from "@/components/subtitle-workspace";
-
+/** 實際內容由 DashboardWorkspaceHost 以 keep-alive 掛載 */
 export default function SubtitlePage() {
-  return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <SubtitleWorkspace />
-    </div>
-  );
+  return null;
 }

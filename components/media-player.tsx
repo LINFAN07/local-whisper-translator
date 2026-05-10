@@ -222,7 +222,7 @@ export function MediaPlayer() {
             >
               <div className="mx-auto w-full max-w-[min(42rem,92%)] text-center">
                 <p
-                  className="line-clamp-3 text-pretty text-sm font-medium leading-snug text-white sm:text-base"
+                  className="line-clamp-4 whitespace-pre-line text-pretty text-sm font-medium leading-snug text-white sm:text-base"
                   style={{
                     textShadow:
                       "0 0 2px rgba(0,0,0,0.95), 0 1px 2px rgba(0,0,0,0.9), 0 2px 12px rgba(0,0,0,0.75)",
@@ -232,7 +232,7 @@ export function MediaPlayer() {
                 </p>
                 {overlayTranslated ?
                   <p
-                    className="mt-1 line-clamp-2 text-pretty text-xs font-normal leading-snug text-white/95 sm:text-sm"
+                    className="mt-1 line-clamp-3 whitespace-pre-line text-pretty text-xs font-normal leading-snug text-white/95 sm:text-sm"
                     style={{
                       textShadow:
                         "0 0 2px rgba(0,0,0,0.95), 0 1px 2px rgba(0,0,0,0.85)",
@@ -246,7 +246,9 @@ export function MediaPlayer() {
           : null}
         </div>
         {mediaName ? (
-          <p className="truncate text-xs text-muted-foreground">{mediaName}</p>
+          <p className="truncate text-base text-muted-foreground">
+            {mediaName}
+          </p>
         ) : null}
       </div>
     );
@@ -270,7 +272,9 @@ export function MediaPlayer() {
         />
       </div>
       {mediaName ? (
-        <p className="truncate text-xs text-muted-foreground">{mediaName}</p>
+        <p className="truncate text-base text-muted-foreground">
+          {mediaName}
+        </p>
       ) : null}
     </div>
   );
